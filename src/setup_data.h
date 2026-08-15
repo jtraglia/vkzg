@@ -13,9 +13,9 @@ namespace kzgpu {
  * lifetime of the protocol, so they are compiled in rather than loaded.
  * sha256 of the bytes below: 08797579f6cfd5788eddc1a215d64dcfabd04acbcaf2953fb2c1afb830f43315
  *
- * tests/test_setup_data.cpp re-parses the canonical trusted_setup.txt and
- * compares it against this array, so a transcription error cannot go
- * unnoticed.
+ * To re-verify against the canonical ceremony output:
+ *   python3 tools/embed_setup.py <trusted_setup.txt> /tmp/check.h
+ * and compare the sha256 it prints with the one above.
  */
 constexpr size_t kEmbeddedSetupSize = 196608;
 extern const uint8_t kEmbeddedSetupG1Monomial[kEmbeddedSetupSize];

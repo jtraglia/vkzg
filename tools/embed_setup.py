@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Embed the monomial G1 trusted setup into the library as a byte array.
 
+Provenance tool, not part of the build: the values are fixed for mainnet and
+the generated files are committed.  Run it against a trusted_setup.txt to
+confirm the committed blob matches the ceremony output, or to retarget the
+library at a different ceremony.
+
 Only the monomial G1 section is needed -- the Lagrange G1 points are for
 commitments and the G2 points are for verification, neither of which this
 library does. That is 4096 compressed points, 48 bytes each: 192 KiB.
@@ -60,9 +65,9 @@ def main():
         " * lifetime of the protocol, so they are compiled in rather than loaded.\n",
         f" * sha256 of the bytes below: {digest}\n",
         " *\n",
-        " * tests/test_setup_data.cpp re-parses the canonical trusted_setup.txt and\n",
-        " * compares it against this array, so a transcription error cannot go\n",
-        " * unnoticed.\n",
+        " * To re-verify against the canonical ceremony output:\n",
+        " *   python3 tools/embed_setup.py <trusted_setup.txt> /tmp/check.h\n",
+        " * and compare the sha256 it prints with the one above.\n",
         " */\n",
         f"constexpr size_t kEmbeddedSetupSize = {len(data)};\n",
         "extern const uint8_t kEmbeddedSetupG1Monomial[kEmbeddedSetupSize];\n\n",

@@ -29,9 +29,8 @@ static void fill_blob(uint8_t *blob, uint64_t seed) {
 }
 
 int main(int argc, char **argv) {
-    const char *setup_path = argc > 1 ? argv[1] : "data/trusted_setup.txt";
-    const int reps = argc > 2 ? atoi(argv[2]) : 20;
-    const uint32_t maxBatch = argc > 3 ? (uint32_t)atoi(argv[3]) : 8;
+    const int reps = argc > 1 ? atoi(argv[1]) : 20;
+    const uint32_t maxBatch = argc > 2 ? (uint32_t)atoi(argv[2]) : 8;
 
     kzgpu_options opts;
     kzgpu_options_default(&opts);
@@ -40,7 +39,7 @@ int main(int argc, char **argv) {
 
     kzgpu_prover *p = nullptr;
     double t0 = now_ms();
-    kzgpu_result rc = kzgpu_prover_new_from_file(&p, setup_path, &opts);
+    kzgpu_result rc = kzgpu_prover_new_default(&p, &opts);
     if (rc != KZGPU_OK) {
         printf("prover_new failed: %s\n", kzgpu_error_string(rc));
         return 1;

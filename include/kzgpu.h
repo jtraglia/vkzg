@@ -107,9 +107,13 @@ kzgpu_result kzgpu_prover_new(kzgpu_prover **out, const uint8_t *g1_monomial_byt
                               size_t g1_monomial_len, const kzgpu_options *opts);
 
 /*
- * Loader for the standard `trusted_setup.txt` format, for the same reason:
+ * Loader for the standard `trusted_setup.txt` text format:
  *     <n1> <n2> <n1 lagrange g1> <n2 g2> <n1 monomial g1>
  * Only the monomial G1 section is used; the rest is parsed and discarded.
+ *
+ * Nothing in this repository ships such a file any more -- the mainnet setup
+ * is compiled in -- so this exists purely for callers targeting a different
+ * ceremony who would rather pass a path than bytes.
  */
 kzgpu_result kzgpu_prover_new_from_file(kzgpu_prover **out, const char *trusted_setup_path,
                                         const kzgpu_options *opts);

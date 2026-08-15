@@ -18,16 +18,15 @@ static void fill_blob(uint8_t *blob, uint64_t seed) {
 }
 
 int main(int argc, char **argv) {
-    const char *setup = argc > 1 ? argv[1] : "data/trusted_setup.txt";
-    unsigned batch = argc > 2 ? (unsigned)atoi(argv[2]) : 8;
-    int reps = argc > 3 ? atoi(argv[3]) : 6;
+    unsigned batch = argc > 1 ? (unsigned)atoi(argv[1]) : 8;
+    int reps = argc > 2 ? atoi(argv[2]) : 6;
 
     kzgpu_options o;
     kzgpu_options_default(&o);
     o.table_cache_path = "/tmp/kzgpu_tables_v3.cache";
     o.max_batch_size = batch;
     kzgpu_prover *p = nullptr;
-    if (kzgpu_prover_new_from_file(&p, setup, &o) != KZGPU_OK) { printf("setup failed\n"); return 1; }
+    if (kzgpu_prover_new_default(&p, &o) != KZGPU_OK) { printf("setup failed\n"); return 1; }
 
     std::vector<uint8_t> blobs((size_t)batch * KZGPU_BYTES_PER_BLOB);
     for (unsigned i = 0; i < batch; i++) fill_blob(&blobs[(size_t)i * KZGPU_BYTES_PER_BLOB], i + 1);

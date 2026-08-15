@@ -7,6 +7,7 @@
 //   2. the whole pipeline reproduces the official cells and proofs.
 #include "../src/cpu/reference.h"
 #include "../src/cpu/setup.h"
+#include "../src/setup_data.h"
 #include "vectors.h"
 
 #include <chrono>
@@ -76,36 +77,17 @@ static void test_circulant_equivalence(const SetupTables &tables) {
 }
 
 int main(int argc, char **argv) {
-    const char *setup_path = argc > 1 ? argv[1] : "data/trusted_setup.txt";
-    const char *vec_dir = argc > 2 ? argv[2] : "tests/vectors";
-
-    std::vector<uint8_t> g1_monomial;
-    if (read_trusted_setup_file(setup_path, g1_monomial) != KZGPU_OK) {
-        printf("FAIL: cannot read trusted setup at %s\n", setup_path);
-        return 1;
-    }
+    const char *vec_dir = argc > 1 ? argv[1] : "tests/vectors";
 
     SetupTables tables;
     double t0 = now_ms();
     // Reuse a cache so repeated runs during development are quick.
-    const std::string cache = "/tmp/kzgpu_tables.cache";
-    uint64_t digest = 0;
-    {
-        SetupTables probe;
-        // digest is computed inside build; compute it cheaply here by building
-        // only when the cache misses.
-        if (load_table_cache(cache, 0, probe) == KZGPU_OK) digest = probe.setup_digest;
-    }
-    bool loaded = false;
-    if (digest != 0) {
-        SetupTables cached;
-        if (load_table_cache(cache, digest, cached) == KZGPU_OK) {
-            tables = std::move(cached);
-            loaded = true;
-        }
-    }
+    const std::string cache = "/tmp/kzgpu_tables_ref.cache";
+    const uint64_t digest = compute_setup_digest(kEmbeddedSetupG1Monomial, kEmbeddedSetupSize);
+    bool loaded = load_table_cache(cache, digest, tables) == KZGPU_OK;
     if (!loaded) {
-        if (build_setup_tables(g1_monomial.data(), g1_monomial.size(), false, tables) != KZGPU_OK) {
+        if (build_setup_tables(kEmbeddedSetupG1Monomial, kEmbeddedSetupSize, true, tables) !=
+            KZGPU_OK) {
             printf("FAIL: build_setup_tables\n");
             return 1;
         }

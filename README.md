@@ -106,6 +106,8 @@ ctest --test-dir build --output-on-failure
 ./build/kzgpu_example
 ```
 
+Nothing to download or configure: the trusted setup is compiled in.
+
 ```c
 #include "kzgpu.h"
 
@@ -131,16 +133,19 @@ between threads; calls serialise internally on the GPU queue.
 ### The trusted setup
 
 The mainnet ceremony's monomial G1 points are **compiled into the library** —
-4096 compressed points, 192 KiB — so there is no file to ship, locate or
-validate at runtime. `kzgpu_prover_new_default()` is all a production caller
-needs. `kzgpu_prover_new()` and `kzgpu_prover_new_from_file()` remain for
-testnets or a future ceremony.
+4096 compressed points, 192 KiB, in `src/setup_data.cpp`. The Lagrange G1
+points are for commitments and the G2 points for verification, neither of which
+this library does, so neither is carried. There is no file to ship, locate or
+validate at runtime, and `kzgpu_prover_new_default()` is all a caller needs.
 
-Embedded constants can't be checked at runtime, so `tests/test_setup_data.cpp`
-re-parses the canonical `trusted_setup.txt`, compares it byte for byte against
-the array, and confirms all 4096 points decompress on-curve and in the correct
-subgroup. `tests/test_gpu.cpp` additionally proves a default-constructed prover
-reproduces every spec vector.
+Provenance is checkable: the generated header records the sha256 of the bytes
+(`08797579f6cfd578…`), and `tools/embed_setup.py` regenerates them from a
+canonical `trusted_setup.txt` so anyone can confirm the blob matches the
+ceremony output. The whole test suite runs against the embedded setup, so the
+spec vectors passing is itself evidence the points are right.
+
+`kzgpu_prover_new()` takes raw setup bytes if you ever need to target a
+different ceremony.
 
 Deriving the FK20 tables from the setup takes ~0.9 s; `table_cache_path` brings
 that down to ~60 ms on subsequent starts. The cache stores a digest of the
@@ -256,8 +261,8 @@ Everything above was tuned on an 8-core M1, so on a larger part it is worth
 confirming rather than trusting. Two tools:
 
 ```sh
-./build/bench_kzgpu data/trusted_setup.txt 10 128   # batch sweep, blobs/s
-./build/profile_stages data/trusted_setup.txt 64 6  # per-stage GPU breakdown
+./build/bench_kzgpu 10 128     # batch sweep, blobs/s
+./build/profile_stages 64 6    # per-stage GPU breakdown
 ```
 
 `profile_stages` re-runs the real dispatch sequence with the command buffer
@@ -319,6 +324,6 @@ emitted from one script, so the two representations cannot drift.
 
 ## License
 
-The trusted setup (`data/trusted_setup.txt`, and therefore `src/setup_data.cpp`)
-and the test vectors under `tests/vectors/` are from
+The embedded trusted setup (`src/setup_data.cpp`) and the test vectors under
+`tests/vectors/` come from
 [c-kzg-4844](https://github.com/ethereum/c-kzg-4844) (Apache-2.0).
