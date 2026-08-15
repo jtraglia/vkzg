@@ -52,7 +52,8 @@ add_library(kzgpu
     src/kzgpu_metal.mm
     src/cpu/bls12_381.cpp
     src/cpu/setup.cpp
-    src/cpu/device_convert.cpp)
+    src/cpu/device_convert.cpp
+    src/cpu/cpu_msm.cpp)
 
 if(TARGET kzgpu_generated)
     add_dependencies(kzgpu kzgpu_generated)

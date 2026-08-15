@@ -68,6 +68,25 @@ typedef struct {
     int validate_setup;
 
     /*
+     * How many CPU worker threads may help the GPU.
+     *
+     * On Apple silicon the integer multiplier is the bottleneck for BLS12-381,
+     * and the GPU's is comparatively weak: a 32x32->64 multiply issues about
+     * every 8.9 cycles per lane, so the whole 8-core M1 GPU reaches roughly the
+     * same field-multiply throughput as its CPU cores.  Both MSM phases split
+     * their 128 independent outputs between GPU and CPU and run them
+     * concurrently, which is worth about 1.5x over GPU-only.
+     *
+     *   -1  disable, use the GPU alone
+     *    0  auto (default): hardware_concurrency() - 1
+     *   >0  use exactly this many worker threads
+     *
+     * Set this to -1, or to a small number, if the calling process needs its
+     * cores for other work.
+     */
+    int32_t cpu_assist_threads;
+
+    /*
      * Number of blobs the prover should be able to have in flight.  Larger
      * values raise steady-state throughput at the cost of memory (roughly
      * 2 MiB per blob).  0 selects a sensible default.
