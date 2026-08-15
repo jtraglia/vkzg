@@ -1,0 +1,739 @@
+#include "bls12_381.h"
+
+#include "bls12_381_constants.h"
+
+#include <cassert>
+
+namespace kzgpu {
+namespace {
+
+typedef unsigned __int128 u128;
+
+constexpr uint64_t kP[6] = KZGPU_FP_P;
+constexpr uint64_t kFpN0 = KZGPU_FP_N0;
+constexpr uint64_t kFpR2[6] = KZGPU_FP_R2;
+constexpr uint64_t kR[4] = KZGPU_FR_R_MOD;
+constexpr uint64_t kFrN0 = KZGPU_FR_N0;
+constexpr uint64_t kFrR2[4] = KZGPU_FR_R2;
+
+// ---------------------------------------------------------------- helpers
+
+// r = a + b + carry_in, returns carry out.
+inline uint64_t addc(uint64_t a, uint64_t b, uint64_t carry, uint64_t &r) {
+    u128 t = (u128)a + b + carry;
+    r = (uint64_t)t;
+    return (uint64_t)(t >> 64);
+}
+
+// r = a - b - borrow_in, returns borrow out.
+inline uint64_t subb(uint64_t a, uint64_t b, uint64_t borrow, uint64_t &r) {
+    u128 t = (u128)a - b - borrow;
+    r = (uint64_t)t;
+    return (uint64_t)((t >> 64) & 1);
+}
+
+// (hi, lo) = a * b + c + carry
+inline uint64_t mac(uint64_t a, uint64_t b, uint64_t c, uint64_t carry, uint64_t &lo) {
+    u128 t = (u128)a * b + c + carry;
+    lo = (uint64_t)t;
+    return (uint64_t)(t >> 64);
+}
+
+template <int N>
+inline int cmp_n(const uint64_t *a, const uint64_t *b) {
+    for (int i = N - 1; i >= 0; i--) {
+        if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+    }
+    return 0;
+}
+
+// Conditional subtraction of the modulus.
+template <int N>
+inline void csub_mod(uint64_t *a, const uint64_t *mod) {
+    uint64_t t[N], borrow = 0;
+    for (int i = 0; i < N; i++) borrow = subb(a[i], mod[i], borrow, t[i]);
+    if (!borrow) {
+        for (int i = 0; i < N; i++) a[i] = t[i];
+    }
+}
+
+// Coarsely Integrated Operand Scanning Montgomery multiplication.
+template <int N>
+void mont_mul_n(uint64_t *r, const uint64_t *a, const uint64_t *b, const uint64_t *mod,
+                uint64_t n0) {
+    uint64_t t[N + 2] = {0};
+    for (int i = 0; i < N; i++) {
+        uint64_t carry = 0;
+        for (int j = 0; j < N; j++) carry = mac(a[j], b[i], t[j], carry, t[j]);
+        uint64_t c2 = addc(t[N], carry, 0, t[N]);
+        t[N + 1] = c2;
+
+        uint64_t m = t[0] * n0;
+        uint64_t discard;
+        carry = mac(m, mod[0], t[0], 0, discard);
+        for (int j = 1; j < N; j++) carry = mac(m, mod[j], t[j], carry, t[j - 1]);
+        c2 = addc(t[N], carry, 0, t[N - 1]);
+        t[N] = t[N + 1] + c2;
+    }
+    // t is < 2*mod at this point; subtract once if needed.
+    uint64_t s[N], borrow = 0;
+    for (int i = 0; i < N; i++) borrow = subb(t[i], mod[i], borrow, s[i]);
+    borrow = subb(t[N], 0, borrow, t[N]);
+    const uint64_t *src = borrow ? t : s;
+    for (int i = 0; i < N; i++) r[i] = src[i];
+}
+
+template <int N>
+void add_mod_n(uint64_t *r, const uint64_t *a, const uint64_t *b, const uint64_t *mod) {
+    uint64_t carry = 0;
+    for (int i = 0; i < N; i++) carry = addc(a[i], b[i], carry, r[i]);
+    // p < 2^(64N-1) for both our moduli, so the sum never overflows N limbs.
+    csub_mod<N>(r, mod);
+}
+
+template <int N>
+void sub_mod_n(uint64_t *r, const uint64_t *a, const uint64_t *b, const uint64_t *mod) {
+    uint64_t borrow = 0;
+    for (int i = 0; i < N; i++) borrow = subb(a[i], b[i], borrow, r[i]);
+    if (borrow) {
+        uint64_t carry = 0;
+        for (int i = 0; i < N; i++) carry = addc(r[i], mod[i], carry, r[i]);
+    }
+}
+
+template <int N>
+bool is_zero_n(const uint64_t *a) {
+    uint64_t acc = 0;
+    for (int i = 0; i < N; i++) acc |= a[i];
+    return acc == 0;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------- Fp
+
+const Fp kFpZero = {{0, 0, 0, 0, 0, 0}};
+const Fp kFpOne = {KZGPU_FP_R};
+const Fp kFpBeta = {KZGPU_FP_BETA};
+
+void fp_add(Fp &r, const Fp &a, const Fp &b) { add_mod_n<6>(r.v, a.v, b.v, kP); }
+void fp_sub(Fp &r, const Fp &a, const Fp &b) { sub_mod_n<6>(r.v, a.v, b.v, kP); }
+void fp_neg(Fp &r, const Fp &a) { sub_mod_n<6>(r.v, kFpZero.v, a.v, kP); }
+void fp_mul(Fp &r, const Fp &a, const Fp &b) { mont_mul_n<6>(r.v, a.v, b.v, kP, kFpN0); }
+void fp_sqr(Fp &r, const Fp &a) { mont_mul_n<6>(r.v, a.v, a.v, kP, kFpN0); }
+void fp_dbl(Fp &r, const Fp &a) { add_mod_n<6>(r.v, a.v, a.v, kP); }
+bool fp_is_zero(const Fp &a) { return is_zero_n<6>(a.v); }
+bool fp_eq(const Fp &a, const Fp &b) { return cmp_n<6>(a.v, b.v) == 0; }
+
+namespace {
+// Exponentiation by a fixed big-endian-limb exponent, used for inversion and
+// square roots. Not constant time -- inputs here are public data.
+void fp_pow_limbs(Fp &r, const Fp &a, const uint64_t *e, int nlimbs) {
+    Fp acc = kFpOne;
+    bool started = false;
+    for (int i = nlimbs - 1; i >= 0; i--) {
+        for (int b = 63; b >= 0; b--) {
+            if (started) fp_sqr(acc, acc);
+            if ((e[i] >> b) & 1) {
+                if (started) {
+                    fp_mul(acc, acc, a);
+                } else {
+                    acc = a;
+                    started = true;
+                }
+            }
+        }
+    }
+    r = acc;
+}
+} // namespace
+
+void fp_inv(Fp &r, const Fp &a) {
+    static const uint64_t e[6] = KZGPU_FP_P_MINUS_2;
+    fp_pow_limbs(r, a, e, 6);
+}
+
+void fp_from_u64(Fp &r, uint64_t x) {
+    Fp t = {{x, 0, 0, 0, 0, 0}};
+    mont_mul_n<6>(r.v, t.v, kFpR2, kP, kFpN0); // into Montgomery form
+}
+
+bool fp_from_bytes(Fp &r, const uint8_t in[48]) {
+    uint64_t t[6] = {0};
+    for (int i = 0; i < 6; i++) {
+        uint64_t w = 0;
+        for (int j = 0; j < 8; j++) w = (w << 8) | in[i * 8 + j];
+        t[5 - i] = w;
+    }
+    if (cmp_n<6>(t, kP) >= 0) return false;
+    mont_mul_n<6>(r.v, t, kFpR2, kP, kFpN0);
+    return true;
+}
+
+namespace {
+void fp_to_canonical(uint64_t out[6], const Fp &a) {
+    static const uint64_t one[6] = {1, 0, 0, 0, 0, 0};
+    mont_mul_n<6>(out, a.v, one, kP, kFpN0); // multiply by 1 => out of Montgomery
+}
+} // namespace
+
+void fp_to_bytes(uint8_t out[48], const Fp &a) {
+    uint64_t t[6];
+    fp_to_canonical(t, a);
+    for (int i = 0; i < 6; i++) {
+        uint64_t w = t[5 - i];
+        for (int j = 0; j < 8; j++) out[i * 8 + j] = (uint8_t)(w >> (56 - 8 * j));
+    }
+}
+
+bool fp_is_lexicographically_largest(const Fp &a) {
+    uint64_t t[6];
+    fp_to_canonical(t, a);
+    // Compare against (p-1)/2 == p >> 1.
+    uint64_t half[6];
+    for (int i = 0; i < 6; i++) {
+        half[i] = (kP[i] >> 1) | (i + 1 < 6 ? kP[i + 1] << 63 : 0);
+    }
+    return cmp_n<6>(t, half) > 0;
+}
+
+// ---------------------------------------------------------------------- Fr
+
+const Fr kFrZero = {{0, 0, 0, 0}};
+const Fr kFrOne = {KZGPU_FR_ONE};
+
+void fr_add(Fr &r, const Fr &a, const Fr &b) { add_mod_n<4>(r.v, a.v, b.v, kR); }
+void fr_sub(Fr &r, const Fr &a, const Fr &b) { sub_mod_n<4>(r.v, a.v, b.v, kR); }
+void fr_neg(Fr &r, const Fr &a) { sub_mod_n<4>(r.v, kFrZero.v, a.v, kR); }
+void fr_mul(Fr &r, const Fr &a, const Fr &b) { mont_mul_n<4>(r.v, a.v, b.v, kR, kFrN0); }
+void fr_sqr(Fr &r, const Fr &a) { mont_mul_n<4>(r.v, a.v, a.v, kR, kFrN0); }
+bool fr_is_zero(const Fr &a) { return is_zero_n<4>(a.v); }
+bool fr_eq(const Fr &a, const Fr &b) { return cmp_n<4>(a.v, b.v) == 0; }
+
+void fr_from_u64(Fr &r, uint64_t x) {
+    Fr t = {{x, 0, 0, 0}};
+    mont_mul_n<4>(r.v, t.v, kFrR2, kR, kFrN0);
+}
+
+void fr_from_canonical(Fr &r, const uint64_t in[4]) {
+    mont_mul_n<4>(r.v, in, kFrR2, kR, kFrN0);
+}
+
+void fr_to_canonical(uint64_t out[4], const Fr &a) {
+    static const uint64_t one[4] = {1, 0, 0, 0};
+    mont_mul_n<4>(out, a.v, one, kR, kFrN0);
+}
+
+bool fr_from_bytes(Fr &r, const uint8_t in[32]) {
+    uint64_t t[4];
+    for (int i = 0; i < 4; i++) {
+        uint64_t w = 0;
+        for (int j = 0; j < 8; j++) w = (w << 8) | in[i * 8 + j];
+        t[3 - i] = w;
+    }
+    if (cmp_n<4>(t, kR) >= 0) return false;
+    fr_from_canonical(r, t);
+    return true;
+}
+
+void fr_to_bytes(uint8_t out[32], const Fr &a) {
+    uint64_t t[4];
+    fr_to_canonical(t, a);
+    for (int i = 0; i < 4; i++) {
+        uint64_t w = t[3 - i];
+        for (int j = 0; j < 8; j++) out[i * 8 + j] = (uint8_t)(w >> (56 - 8 * j));
+    }
+}
+
+void fr_pow(Fr &r, const Fr &a, uint64_t e) {
+    Fr acc = kFrOne, base = a;
+    while (e) {
+        if (e & 1) fr_mul(acc, acc, base);
+        fr_sqr(base, base);
+        e >>= 1;
+    }
+    r = acc;
+}
+
+void fr_inv(Fr &r, const Fr &a) {
+    static const uint64_t e[4] = KZGPU_FR_R_MINUS_2;
+    Fr acc = kFrOne;
+    bool started = false;
+    for (int i = 3; i >= 0; i--) {
+        for (int b = 63; b >= 0; b--) {
+            if (started) fr_sqr(acc, acc);
+            if ((e[i] >> b) & 1) {
+                if (started) {
+                    fr_mul(acc, acc, a);
+                } else {
+                    acc = a;
+                    started = true;
+                }
+            }
+        }
+    }
+    r = acc;
+}
+
+void fr_root_of_unity(Fr &r, size_t log_order) {
+    assert(log_order <= 13);
+    Fr root = {KZGPU_FR_ROOT_8192}; // primitive 2^13-th root
+    for (size_t i = log_order; i < 13; i++) fr_sqr(root, root);
+    r = root;
+}
+
+// ---------------------------------------------------------------------- G1
+
+const G1 kG1Identity = {kFpZero, kFpOne, kFpZero};
+
+void g1_set_identity(G1 &r) { r = kG1Identity; }
+bool g1_is_identity(const G1 &p) { return fp_is_zero(p.z); }
+
+void g1_neg(G1 &r, const G1 &p) {
+    r = p;
+    fp_neg(r.y, p.y);
+}
+
+// dbl-2009-l (a == 0). Results go to locals first so that `r` may alias `p`,
+// which the double-and-add loops rely on.
+void g1_dbl(G1 &r, const G1 &p) {
+    if (fp_is_zero(p.z)) {
+        r = p;
+        return;
+    }
+    Fp A, B, C, D, E, F, t0, t1, x3, y3, z3;
+    fp_sqr(A, p.x);          // A = X^2
+    fp_sqr(B, p.y);          // B = Y^2
+    fp_sqr(C, B);            // C = B^2
+    fp_add(t0, p.x, B);      // X + B
+    fp_sqr(t0, t0);          // (X+B)^2
+    fp_sub(t0, t0, A);       // - A
+    fp_sub(t0, t0, C);       // - C
+    fp_dbl(D, t0);           // D = 2*((X+B)^2 - A - C)
+    fp_dbl(E, A);            //
+    fp_add(E, E, A);         // E = 3A
+    fp_sqr(F, E);            // F = E^2
+    fp_dbl(t0, D);           // 2D
+    fp_sub(x3, F, t0);       // X3 = F - 2D
+    fp_sub(t0, D, x3);       // D - X3
+    fp_mul(t0, E, t0);       // E*(D - X3)
+    fp_dbl(t1, C);           // 2C
+    fp_dbl(t1, t1);          // 4C
+    fp_dbl(t1, t1);          // 8C
+    fp_sub(y3, t0, t1);      // Y3 = E*(D-X3) - 8C
+    fp_mul(t0, p.y, p.z);    //
+    fp_dbl(z3, t0);          // Z3 = 2*Y*Z
+    r.x = x3;
+    r.y = y3;
+    r.z = z3;
+}
+
+// add-2007-bl (a == 0)
+void g1_add(G1 &r, const G1 &a, const G1 &b) {
+    if (fp_is_zero(a.z)) {
+        r = b;
+        return;
+    }
+    if (fp_is_zero(b.z)) {
+        r = a;
+        return;
+    }
+    Fp Z1Z1, Z2Z2, U1, U2, S1, S2, H, I, J, K, t0, t1;
+    fp_sqr(Z1Z1, a.z);
+    fp_sqr(Z2Z2, b.z);
+    fp_mul(U1, a.x, Z2Z2);
+    fp_mul(U2, b.x, Z1Z1);
+    fp_mul(t0, b.z, Z2Z2);
+    fp_mul(S1, a.y, t0);
+    fp_mul(t0, a.z, Z1Z1);
+    fp_mul(S2, b.y, t0);
+    if (fp_eq(U1, U2)) {
+        if (fp_eq(S1, S2)) {
+            g1_dbl(r, a);
+        } else {
+            g1_set_identity(r);
+        }
+        return;
+    }
+    fp_sub(H, U2, U1);
+    fp_dbl(t0, H);
+    fp_sqr(I, t0);         // I = (2H)^2
+    fp_mul(J, H, I);       // J = H*I
+    fp_sub(t0, S2, S1);
+    fp_dbl(K, t0);         // K = 2*(S2 - S1)
+    fp_mul(t0, U1, I);     // V = U1*I
+    Fp x3, y3, z3;
+    fp_sqr(x3, K);
+    fp_sub(x3, x3, J);
+    fp_dbl(t1, t0);
+    fp_sub(x3, x3, t1);    // X3 = K^2 - J - 2V
+    fp_sub(t1, t0, x3);    // V - X3
+    fp_mul(t1, K, t1);
+    fp_mul(t0, S1, J);
+    fp_dbl(t0, t0);
+    fp_sub(y3, t1, t0);    // Y3 = K*(V-X3) - 2*S1*J
+    fp_add(t0, a.z, b.z);
+    fp_sqr(t0, t0);
+    fp_sub(t0, t0, Z1Z1);
+    fp_sub(t0, t0, Z2Z2);
+    fp_mul(z3, t0, H);     // Z3 = ((Z1+Z2)^2 - Z1Z1 - Z2Z2)*H
+    r.x = x3;
+    r.y = y3;
+    r.z = z3;
+}
+
+// madd-2007-bl: a Jacobian, b affine (Z2 == 1).
+void g1_add_mixed(G1 &r, const G1 &a, const G1Affine &b) {
+    if (fp_is_zero(b.x) && fp_is_zero(b.y)) {
+        r = a;
+        return;
+    }
+    if (fp_is_zero(a.z)) {
+        r.x = b.x;
+        r.y = b.y;
+        r.z = kFpOne;
+        return;
+    }
+    Fp Z1Z1, U2, S2, H, HH, I, J, K, V, t0, t1;
+    fp_sqr(Z1Z1, a.z);
+    fp_mul(U2, b.x, Z1Z1);
+    fp_mul(t0, a.z, Z1Z1);
+    fp_mul(S2, b.y, t0);
+    if (fp_eq(a.x, U2)) {
+        if (fp_eq(a.y, S2)) {
+            g1_dbl(r, a);
+        } else {
+            g1_set_identity(r);
+        }
+        return;
+    }
+    fp_sub(H, U2, a.x);
+    fp_sqr(HH, H);
+    fp_dbl(I, HH);
+    fp_dbl(I, I);          // I = 4*HH
+    fp_mul(J, H, I);
+    fp_sub(t0, S2, a.y);
+    fp_dbl(K, t0);         // K = 2*(S2 - Y1)
+    fp_mul(V, a.x, I);
+    Fp x3, y3, z3;
+    fp_sqr(x3, K);
+    fp_sub(x3, x3, J);
+    fp_dbl(t0, V);
+    fp_sub(x3, x3, t0);    // X3 = K^2 - J - 2V
+    fp_sub(t0, V, x3);
+    fp_mul(t0, K, t0);
+    fp_mul(t1, a.y, J);
+    fp_dbl(t1, t1);
+    fp_sub(y3, t0, t1);    // Y3 = K*(V-X3) - 2*Y1*J
+    fp_add(t0, a.z, H);
+    fp_sqr(t0, t0);
+    fp_sub(t0, t0, Z1Z1);
+    fp_sub(z3, t0, HH);    // Z3 = (Z1+H)^2 - Z1Z1 - HH
+    r.x = x3;
+    r.y = y3;
+    r.z = z3;
+}
+
+void g1_sub(G1 &r, const G1 &a, const G1 &b) {
+    G1 nb;
+    g1_neg(nb, b);
+    g1_add(r, a, nb);
+}
+
+void g1_from_affine(G1 &r, const G1Affine &a) {
+    if (fp_is_zero(a.x) && fp_is_zero(a.y)) {
+        g1_set_identity(r);
+        return;
+    }
+    r.x = a.x;
+    r.y = a.y;
+    r.z = kFpOne;
+}
+
+void g1_mul(G1 &r, const G1 &p, const Fr &k) {
+    uint64_t e[4];
+    fr_to_canonical(e, k);
+    G1 acc = kG1Identity;
+    bool started = false;
+    for (int i = 3; i >= 0; i--) {
+        for (int b = 63; b >= 0; b--) {
+            if (started) g1_dbl(acc, acc);
+            if ((e[i] >> b) & 1) {
+                if (started) {
+                    g1_add(acc, acc, p);
+                } else {
+                    acc = p;
+                    started = true;
+                }
+            }
+        }
+    }
+    r = acc;
+}
+
+bool g1_eq(const G1 &a, const G1 &b) {
+    bool ai = g1_is_identity(a), bi = g1_is_identity(b);
+    if (ai || bi) return ai && bi;
+    Fp z1z1, z2z2, u1, u2, s1, s2, t;
+    fp_sqr(z1z1, a.z);
+    fp_sqr(z2z2, b.z);
+    fp_mul(u1, a.x, z2z2);
+    fp_mul(u2, b.x, z1z1);
+    fp_mul(t, b.z, z2z2);
+    fp_mul(s1, a.y, t);
+    fp_mul(t, a.z, z1z1);
+    fp_mul(s2, b.y, t);
+    return fp_eq(u1, u2) && fp_eq(s1, s2);
+}
+
+void batch_inverse(Fp *out, const Fp *in, size_t n) {
+    if (n == 0) return;
+    // Prefix products, skipping zeros (which invert to zero).
+    Fp acc = kFpOne;
+    for (size_t i = 0; i < n; i++) {
+        out[i] = acc;
+        if (!fp_is_zero(in[i])) fp_mul(acc, acc, in[i]);
+    }
+    Fp inv;
+    fp_inv(inv, acc);
+    for (size_t i = n; i-- > 0;) {
+        if (fp_is_zero(in[i])) {
+            out[i] = kFpZero;
+            continue;
+        }
+        Fp t;
+        fp_mul(t, out[i], inv);       // = 1 / in[i]
+        fp_mul(inv, inv, in[i]);      // advance
+        out[i] = t;
+    }
+}
+
+void g1_to_affine(G1Affine &out, const G1 &in) {
+    if (g1_is_identity(in)) {
+        out.x = kFpZero;
+        out.y = kFpZero;
+        return;
+    }
+    Fp zinv, zinv2, zinv3;
+    fp_inv(zinv, in.z);
+    fp_sqr(zinv2, zinv);
+    fp_mul(zinv3, zinv2, zinv);
+    fp_mul(out.x, in.x, zinv2);
+    fp_mul(out.y, in.y, zinv3);
+}
+
+void g1_batch_to_affine(G1Affine *out, const G1 *in, size_t n) {
+    if (n == 0) return;
+    Fp *zs = new Fp[n];
+    Fp *inv = new Fp[n];
+    for (size_t i = 0; i < n; i++) zs[i] = in[i].z;
+    batch_inverse(inv, zs, n);
+    for (size_t i = 0; i < n; i++) {
+        if (fp_is_zero(in[i].z)) {
+            out[i].x = kFpZero;
+            out[i].y = kFpZero;
+            continue;
+        }
+        Fp z2, z3;
+        fp_sqr(z2, inv[i]);
+        fp_mul(z3, z2, inv[i]);
+        fp_mul(out[i].x, in[i].x, z2);
+        fp_mul(out[i].y, in[i].y, z3);
+    }
+    delete[] zs;
+    delete[] inv;
+}
+
+bool g1_affine_is_on_curve(const G1Affine &p) {
+    if (fp_is_zero(p.x) && fp_is_zero(p.y)) return true; // infinity
+    Fp lhs, rhs, four;
+    fp_sqr(lhs, p.y);
+    fp_sqr(rhs, p.x);
+    fp_mul(rhs, rhs, p.x);
+    fp_from_u64(four, 4);
+    fp_add(rhs, rhs, four);
+    return fp_eq(lhs, rhs);
+}
+
+void g1_affine_endo(G1Affine &out, const G1Affine &in) {
+    fp_mul(out.x, in.x, kFpBeta);
+    out.y = in.y;
+}
+
+bool g1_affine_in_subgroup(const G1Affine &p) {
+    if (fp_is_zero(p.x) && fp_is_zero(p.y)) return true;
+    // P is in the prime-order subgroup iff phi(P) == [lambda]P.
+    G1Affine phi;
+    g1_affine_endo(phi, p);
+    G1 lhs, rhs, jp;
+    g1_from_affine(jp, p);
+    g1_from_affine(lhs, phi);
+    // lambda is short over Z (~128 bits); multiply by it directly.
+    static const uint64_t lam[4] = KZGPU_GLV_LAMBDA_INT;
+    G1 acc = kG1Identity;
+    bool started = false;
+    for (int i = 3; i >= 0; i--) {
+        for (int b = 63; b >= 0; b--) {
+            if (started) g1_dbl(acc, acc);
+            if ((lam[i] >> b) & 1) {
+                if (started) {
+                    g1_add(acc, acc, jp);
+                } else {
+                    acc = jp;
+                    started = true;
+                }
+            }
+        }
+    }
+    rhs = acc;
+    return g1_eq(lhs, rhs);
+}
+
+bool g1_decompress(G1Affine &out, const uint8_t in[48]) {
+    const uint8_t flags = in[0];
+    const bool compressed = (flags & 0x80) != 0;
+    const bool infinity = (flags & 0x40) != 0;
+    const bool sign = (flags & 0x20) != 0;
+    if (!compressed) return false; // we only accept the compressed encoding
+
+    uint8_t xb[48];
+    memcpy(xb, in, 48);
+    xb[0] &= 0x1f;
+
+    if (infinity) {
+        // All remaining bits must be zero for a canonical encoding.
+        for (int i = 0; i < 48; i++) {
+            if (xb[i] != 0) return false;
+        }
+        if (sign) return false;
+        out.x = kFpZero;
+        out.y = kFpZero;
+        return true;
+    }
+
+    if (!fp_from_bytes(out.x, xb)) return false;
+    Fp y2, four;
+    fp_sqr(y2, out.x);
+    fp_mul(y2, y2, out.x);
+    fp_from_u64(four, 4);
+    fp_add(y2, y2, four);
+    // p == 3 (mod 4), so sqrt(a) == a^((p+1)/4).
+    static const uint64_t e[6] = KZGPU_FP_P_MINUS_3_DIV_4;
+    Fp y;
+    fp_pow_limbs(y, y2, e, 6);
+    fp_mul(y, y, y2); // a^((p-3)/4) * a == a^((p+1)/4)
+    Fp check;
+    fp_sqr(check, y);
+    if (!fp_eq(check, y2)) return false; // not a quadratic residue
+    if (fp_is_lexicographically_largest(y) != sign) fp_neg(y, y);
+    out.y = y;
+    return true;
+}
+
+void g1_compress(uint8_t out[48], const G1Affine &p) {
+    if (fp_is_zero(p.x) && fp_is_zero(p.y)) {
+        memset(out, 0, 48);
+        out[0] = 0xc0;
+        return;
+    }
+    fp_to_bytes(out, p.x);
+    out[0] |= 0x80;
+    if (fp_is_lexicographically_largest(p.y)) out[0] |= 0x20;
+}
+
+bool glv_split(const Fr &k, uint64_t k1[2], bool &k1_neg, uint64_t k2[2], bool &k2_neg) {
+    // c1 = round(k*(lambda+1)/r) via a precomputed 2^512 reciprocal; c2 is 0 or
+    // -1 because 0 <= k < r.  Then
+    //     k1 = k - c1*lambda + c2,  k2 = c1 + c2*(lambda + 1).
+    static const uint64_t lam[4] = KZGPU_GLV_LAMBDA_INT;
+    static const uint64_t mu[8] = KZGPU_GLV_MU;
+    static const uint64_t rmod[4] = KZGPU_FR_MODULUS_INT;
+
+    uint64_t kk[4];
+    fr_to_canonical(kk, k);
+
+    // prod = k * mu  (4 x 8 limbs -> 12 limbs); c1 = prod >> 512.
+    uint64_t prod[12] = {0};
+    for (int i = 0; i < 4; i++) {
+        uint64_t carry = 0;
+        for (int j = 0; j < 8; j++) carry = mac(kk[i], mu[j], prod[i + j], carry, prod[i + j]);
+        prod[i + 8] += carry;
+    }
+    // Round rather than truncate: add 2^511 before the >> 512.
+    {
+        uint64_t carry = addc(prod[7], 0x8000000000000000ULL, 0, prod[7]);
+        for (int i = 8; i < 12 && carry; i++) carry = addc(prod[i], 0, carry, prod[i]);
+    }
+    uint64_t c1[4] = {prod[8], prod[9], prod[10], prod[11]};
+
+    // c2 = -round(k/r): 1 when k >= r/2, else 0 (stored as magnitude).
+    uint64_t half[4];
+    for (int i = 0; i < 4; i++) half[i] = (rmod[i] >> 1) | (i + 1 < 4 ? rmod[i + 1] << 63 : 0);
+    const bool c2_is_one = cmp_n<4>(kk, half) >= 0;
+
+    // t = c1 * lambda (both ~128 bits, so 4 limbs is plenty for the product).
+    uint64_t t[8] = {0};
+    for (int i = 0; i < 4; i++) {
+        uint64_t carry = 0;
+        for (int j = 0; j < 4; j++) carry = mac(c1[i], lam[j], t[i + j], carry, t[i + j]);
+        t[i + 4] += carry;
+    }
+
+    // k1 = k - t - (c2_is_one ? 1 : 0)
+    uint64_t r1[4];
+    uint64_t borrow = 0;
+    for (int i = 0; i < 4; i++) borrow = subb(kk[i], t[i], borrow, r1[i]);
+    if (c2_is_one) {
+        uint64_t b2 = 0;
+        uint64_t one[4] = {1, 0, 0, 0};
+        for (int i = 0; i < 4; i++) b2 = subb(r1[i], one[i], b2, r1[i]);
+        borrow |= b2;
+    }
+    k1_neg = borrow != 0;
+    if (k1_neg) { // negate: k1 = -(r1) as a magnitude
+        uint64_t carry = 1;
+        for (int i = 0; i < 4; i++) {
+            uint64_t inv = ~r1[i];
+            carry = addc(inv, 0, carry, r1[i]);
+        }
+    }
+
+    // k2 = c1 - (c2_is_one ? lambda + 1 : 0)
+    uint64_t r2[4];
+    if (c2_is_one) {
+        uint64_t lp1[4] = {lam[0], lam[1], lam[2], lam[3]};
+        uint64_t carry = 1;
+        for (int i = 0; i < 4; i++) carry = addc(lp1[i], 0, carry, lp1[i]);
+        uint64_t b = 0;
+        for (int i = 0; i < 4; i++) b = subb(c1[i], lp1[i], b, r2[i]);
+        k2_neg = b != 0;
+    } else {
+        for (int i = 0; i < 4; i++) r2[i] = c1[i];
+        k2_neg = false;
+    }
+    if (k2_neg) {
+        uint64_t carry = 1;
+        for (int i = 0; i < 4; i++) {
+            uint64_t inv = ~r2[i];
+            carry = addc(inv, 0, carry, r2[i]);
+        }
+    }
+
+    if (r1[2] | r1[3] | r2[2] | r2[3]) return false; // wider than 128 bits
+    k1[0] = r1[0];
+    k1[1] = r1[1];
+    k2[0] = r2[0];
+    k2[1] = r2[1];
+    return true;
+}
+
+uint32_t bit_reverse(uint32_t x, uint32_t bits) {
+    uint32_t r = 0;
+    for (uint32_t i = 0; i < bits; i++) {
+        r = (r << 1) | (x & 1);
+        x >>= 1;
+    }
+    return r;
+}
+
+} // namespace kzgpu
