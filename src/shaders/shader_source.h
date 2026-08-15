@@ -1021,19 +1021,25 @@ kernel void k_phase_b(device uint *out [[buffer(0)]], device const uint *ladder 
 // One SIMD group serves L_REDUCE_LANES-sized teams; a 128-thread threadgroup
 // therefore reduces 16 outputs at once with no threadgroup memory at all.
 kernel void k_bucket_reduce(device uint *out [[buffer(0)]], device const uint *buckets [[buffer(1)]],
+                            constant uint &count [[buffer(2)]],
                             uint2 tgid [[threadgroup_position_in_grid]],
                             uint2 tid2 [[thread_position_in_threadgroup]]) {
     const uint tid = tid2.x;
     const uint team = tid / L_REDUCE_LANES;
     const uint pos = tid % L_REDUCE_LANES;
-    const uint j = tgid.x * L_REDUCE_OUTPUTS_PER_TG + team;
+    // `count` need not be a multiple of the 16 outputs a threadgroup covers.
+    // Teams past the end are clamped onto the last valid output rather than
+    // returning early: reduce_buckets exchanges points with SIMD shuffles, and
+    // those require every lane in the group to participate.
+    const uint raw = tgid.x * L_REDUCE_OUTPUTS_PER_TG + team;
+    const uint j = min(raw, count - 1u);
     const uint b = tgid.y;
 
     device const uint *base =
         buckets + ((ulong)b * L_CIRCULANT_SIZE * L_NUM_BUCKETS + (ulong)j * L_NUM_BUCKETS) *
                       L_JACOBIAN_WORDS;
     const G1 total = reduce_buckets(base, pos);
-    if (pos == 0u) {
+    if (pos == 0u && raw < count) {
         g1_store(out + ((ulong)b * L_CIRCULANT_SIZE + j) * L_JACOBIAN_WORDS, total);
     }
 }
