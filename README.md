@@ -12,25 +12,92 @@ spec test suite, cells and proofs byte-for-byte.
 
 ## Results
 
-Apple M1 (8 GPU cores, 4P+4E CPU cores), macOS 27, one blob:
+Apple M1 (8 GPU cores, 4P+4E CPU cores), macOS 27, passively-cooled MacBook
+Air. c-kzg and kzgpu measured back to back in the same thermal state.
 
-| | per blob | vs baseline |
+**Single blob (latency).** c-kzg cannot parallelise one blob, so this is its
+single-thread time:
+
+| | per blob | speedup |
 |---|---|---|
-| c-kzg-4844, single thread, no precompute | 251.9 ms | — |
-| c-kzg-4844, single thread, `precompute=8` | 168.5 ms | 1.0× |
-| **kzgpu, GPU only, single blob** | **70.0 ms** | 2.4× |
-| **kzgpu, GPU only, batch of 8** | **51.2 ms** | 3.3× |
-| **kzgpu, GPU + CPU, single blob** | **49.1 ms** | 3.4× |
-| **kzgpu, GPU + CPU, batch of 8** | **33.6 ms** | **5.0×** |
+| c-kzg-4844, `precompute=8`, on a P-core | 171 ms | 1.0× |
+| kzgpu, GPU only | 70 ms | 2.4× |
+| **kzgpu, GPU + CPU** | **42.7 ms** | **4.0×** |
+
+**Throughput.** c-kzg is single-threaded per call but a supernode can run one
+per core, which is the comparison that actually matters:
+
+| | blobs/s | ms/blob |
+|---|---|---|
+| c-kzg-4844, 1 thread | 4.9 | 204 |
+| c-kzg-4844, 4 threads | 19.0 | 53 |
+| c-kzg-4844, 8 threads | 26.1 | 38 |
+| **c-kzg-4844, 10-12 threads (saturated)** | **26.9** | **37.2** |
+| kzgpu, GPU only, batch 64 | 21.0 | 47.7 |
+| **kzgpu, GPU + CPU, batch 64** | **33-35** | **28.6-30.7** |
+
+So against c-kzg using every core, this library is **~1.3× faster** in
+throughput and **4× faster** on a single blob.
+
+Note the GPU-only row: on this machine it is *slower* than 8-thread c-kzg. That
+is not a defect in the port — it is what the M1's GPU is, see
+[the integer multiplier](#1-the-gpus-integer-multiplier-is-the-scarce-resource)
+below. The M1 has the smallest GPU Apple ships (8 cores); this library's GPU
+path scales with GPU core count while c-kzg scales with CPU core count, so the
+gap widens in kzgpu's favour on every larger part.
 
 Cells alone (no proofs) are 0.47 ms against c-kzg's 2.5 ms.
 
-Batching is what supernodes should use: it keeps the GPU saturated and lets the
-CPU assist overlap cleanly. Throughput flattens at about 30 blobs/s from a
-batch of 8 onwards.
+### Batching
 
-All numbers are best-of-N on an idle passively-cooled MacBook Air; expect a
-Pro/Max to scale close to linearly with GPU core count.
+Efficiency plateaus quickly and then holds:
+
+| batch | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 |
+|---|---|---|---|---|---|---|---|---|
+| ms/blob (GPU+CPU) | 42.6 | 33.9 | 30.8 | 30.5 | 29.2 | 28.7 | **28.6** | 29.9 |
+| ms/blob (GPU only) | 70.0 | 57.6 | 55.3 | 51.5 | 48.7 | 48.8 | 48.0 | 47.5 |
+
+(Run-to-run spread on a fanless Air is a few percent; 28.6 was the best batch-64
+figure observed, 30.7 the worst.)
+
+Most of the win is in by 8; 64 is the optimum; 128 gives back ~4% to memory
+pressure. Working set is **4.8 MiB per blob** plus a fixed ~28 MiB (the 24 MiB
+FK20 table and the root tables), so a batch of 64 costs 334 MiB and 128 costs
+640 MiB.
+
+A full block is at most a handful of blobs today, so batch 8–16 covers block
+production; use 32–64 when reconstructing in bulk.
+
+### Other Apple GPUs
+
+Extrapolated, not measured — I only have an 8-core M1. The GPU part is
+compute-bound on integer multiplies, so it should scale with GPU core count;
+the ladder and scalar stages (~2.5 ms/blob) do not.
+
+| | GPU cores | est. ms/blob, GPU only | est. blobs/s |
+|---|---|---|---|
+| M1 (measured) | 8 | 48.0 | 20.8 |
+| M1 Pro | 16 | ~25 | ~40 |
+| M1 Max | 32 | ~14 | ~72 |
+| M1 Ultra | 64 | ~8 | ~120 |
+| M4 Max | 40 | ~11.5 | ~85 |
+
+Caveats worth taking seriously:
+
+- These assume per-core integer-multiply throughput matches the M1's measured
+  8.9 cycles per 32×32→64 multiply. Apple has reworked the GPU since (dynamic
+  caching in M3, further changes in M5) and I cannot measure any of it. If
+  integer multiply got faster per core, every row above is pessimistic.
+- I would not put a number on an M5 Max without knowing its GPU core count. If
+  it lands near the M4 Max's 40 cores, the M4 Max row is the right ballpark.
+  Note that M5's headline GPU feature is a Neural Accelerator per core — matrix
+  units for ML, which do nothing for 381-bit integer arithmetic.
+- The Ultra parts are two dies over an interconnect. This workload is
+  compute-bound rather than bandwidth-bound, so it should scale better than
+  memory-heavy kernels, but I have not verified it.
+- On those larger parts the CPU assist matters much less, because the GPU stops
+  being the smaller half of the machine. On an M1 Ultra the GPU-only estimate
+  (~120 blobs/s) already beats what 20 CPU cores could do with c-kzg.
 
 ## Quick start
 
@@ -78,6 +145,7 @@ integer multiplies. Measured ceilings:
 |---|---|
 | `(ulong)a * b` (widening 32×32) | 147 G/s |
 | F_p multiply (12 limbs, CIOS) | 392 M/s |
+| (for scale: one CPU core does 33 M/s) | |
 | F_p add / sub | 4.0 G/s |
 | G1 mixed addition | 22.2 M/s |
 
@@ -189,9 +257,9 @@ emitted from one script, so the two representations cannot drift.
 - **GLV** would halve the ladder's depth (248 → 120 doublings) and its memory.
   The host-side pieces (`glv_split`, the endomorphism) are implemented and
   tested; the phase B kernel does not use them yet.
-- **A faster host F_p multiply.** Ours is 43.6 ns of portable C++ against blst's
-  ~20 ns of assembly. Since the CPU now carries roughly half the work, closing
-  that gap is worth ~20% overall.
+- **A faster host F_p multiply.** Ours is 29.9 ns of portable C++ against blst's
+  ~20 ns of hand-scheduled assembly. Since the CPU carries roughly half the
+  work, closing the remaining gap is worth ~10% overall.
 - **`recover_cells_and_kzg_proofs`** is the natural next entry point for
   supernodes. The expensive half of it is exactly the proof computation this
   library already does; what is missing is the erasure-recovery step.
