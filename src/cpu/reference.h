@@ -14,9 +14,8 @@
 namespace vkp {
 
 
-// Full pipeline. `cells` and `proofs` may be null.
-vkp_result reference_compute(const SetupTables &tables, const uint8_t *blob, uint8_t *cells,
-                               uint8_t *proofs);
+// Full pipeline: blob -> 128 cell proofs.
+vkp_result reference_compute(const SetupTables &tables, const uint8_t *blob, uint8_t *proofs);
 void phase_b_circulant(G1 *out, const G1 *u, const SetupTables &tables);
 
 // The straightforward c-kzg-shaped implementation of phase B (G1 inverse

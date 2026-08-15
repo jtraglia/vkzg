@@ -90,7 +90,6 @@ struct vkp_prover {
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline psoBlobToFr = VK_NULL_HANDLE;
     VkPipeline psoNtt = VK_NULL_HANDLE;
-    VkPipeline psoSerializeCells = VK_NULL_HANDLE;
     VkPipeline psoBuildCirculant = VK_NULL_HANDLE;
     VkPipeline psoPhaseASort = VK_NULL_HANDLE;
     VkPipeline psoPhaseA = VK_NULL_HANDLE;
@@ -104,7 +103,7 @@ struct vkp_prover {
     VkBuf bufTable, bufRootsFwd, bufRootsInv, bufKernelItems, bufKernelOffsets, bufKernelPerm;
 
     // Per-batch working set.
-    VkBuf bufBlob, bufLagrange, bufWorkA, bufPolyExt, bufEvals, bufCells, bufCoeffs, bufBuckets,
+    VkBuf bufBlob, bufLagrange, bufWorkA, bufPolyExt, bufCoeffs, bufBuckets,
         bufItems, bufStarts, bufPerm, bufPoints, bufProofs, bufLadderJac, bufLadderAff,
         bufProofsAff, bufProofBytes, bufNormScratch, bufErr;
 
@@ -213,8 +212,6 @@ bool allocateWorkingSet(vkp_prover *p, uint32_t batch) {
     ok &= createBuffer(p->device, p->physDev, B * kFieldElementsPerBlob * kFrLimbs * 4, p->bufLagrange);
     ok &= createBuffer(p->device, p->physDev, B * kFieldElementsPerExtBlob * kFrLimbs * 4, p->bufWorkA);
     ok &= createBuffer(p->device, p->physDev, B * kFieldElementsPerExtBlob * kFrLimbs * 4, p->bufPolyExt);
-    ok &= createBuffer(p->device, p->physDev, B * kFieldElementsPerExtBlob * kFrLimbs * 4, p->bufEvals);
-    ok &= createBuffer(p->device, p->physDev, B * kFieldElementsPerExtBlob * 32, p->bufCells);
     ok &= createBuffer(p->device, p->physDev, B * kCirculantSize * kPhaseATerms * kFrLimbs * 4, p->bufCoeffs);
     ok &= createBuffer(p->device, p->physDev, B * kCirculantSize * kNumBuckets * kJacobianWords * 4, p->bufBuckets);
     ok &= createBuffer(p->device, p->physDev, B * kCirculantSize * kPhaseAItems * 2, p->bufItems);
@@ -235,9 +232,6 @@ bool allocateWorkingSet(vkp_prover *p, uint32_t batch) {
     ok &= createBuffer(p->device, p->physDev, 4, p->bufErr);
     if (!ok) return false;
 
-    // The forward transform reads a zero-padded polynomial; the upper half is
-    // never written, so zero it once here.
-    memset(p->bufPolyExt.mapped, 0, p->bufPolyExt.size);
     p->maxBatch = batch;
     return true;
 }
@@ -247,8 +241,6 @@ void freeWorkingSet(vkp_prover *p) {
     destroyBuffer(p->device, p->bufLagrange);
     destroyBuffer(p->device, p->bufWorkA);
     destroyBuffer(p->device, p->bufPolyExt);
-    destroyBuffer(p->device, p->bufEvals);
-    destroyBuffer(p->device, p->bufCells);
     destroyBuffer(p->device, p->bufCoeffs);
     destroyBuffer(p->device, p->bufBuckets);
     destroyBuffer(p->device, p->bufItems);
@@ -276,7 +268,7 @@ vkp_prover::~vkp_prover() {
     destroyBuffer(device, bufKernelItems);
     destroyBuffer(device, bufKernelOffsets);
     destroyBuffer(device, bufKernelPerm);
-    for (VkPipeline pso : {psoBlobToFr, psoNtt, psoSerializeCells, psoBuildCirculant, psoPhaseASort,
+    for (VkPipeline pso : {psoBlobToFr, psoNtt, psoBuildCirculant, psoPhaseASort,
                            psoPhaseA, psoPhaseB, psoLadder, psoNormalize, psoCompress, psoReduce}) {
         if (pso) vkDestroyPipeline(device, pso, nullptr);
     }
@@ -375,7 +367,6 @@ vkp_result buildPipelines(vkp_prover *p) {
     } kernels[] = {
         {"k_blob_to_fr", &p->psoBlobToFr},
         {"k_ntt_pass", &p->psoNtt},
-        {"k_serialize_cells", &p->psoSerializeCells},
         {"k_build_circulant", &p->psoBuildCirculant},
         {"k_phase_a_sort", &p->psoPhaseASort},
         {"k_phase_a", &p->psoPhaseA},
@@ -694,8 +685,7 @@ double readStamp(vkp_prover *p, uint32_t idx, const uint64_t *stamps) {
     return (double)(stamps[idx]) * p->timestampPeriodNs / 1e6;
 }
 
-vkp_result computeBatch(vkp_prover *p, uint8_t *cells, uint8_t *proofs, const uint8_t *blobs,
-                          uint32_t batch) {
+vkp_result computeBatch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs, uint32_t batch) {
     StageTimes &st = p->lastStage;
     st = StageTimes{};
     const double tStart = nowMs();
@@ -710,9 +700,7 @@ vkp_result computeBatch(vkp_prover *p, uint8_t *cells, uint8_t *proofs, const ui
     VkCommandBuffer cmd = p->cmdBuf;
 
     uint32_t stamp = 0;
-    auto mark = [&]() {
-        if (proofs) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, p->queryPool, stamp++);
-    };
+    auto mark = [&]() { vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, p->queryPool, stamp++); };
     mark(); // stamp 0: start
 
     // 1. blob bytes -> bit-reversed Lagrange values
@@ -731,83 +719,68 @@ vkp_result computeBatch(vkp_prover *p, uint8_t *cells, uint8_t *proofs, const ui
         memcpy(r.scale_val, p->invBlob, sizeof(r.scale_val));
         recordNtt(cmd, p, p->bufPolyExt, p->bufWorkA, p->bufRootsInv, r, 64, batch);
     }
+    mark(); // stamp 1: scalar stage done
 
-    if (cells) {
-        // 3. forward transform of size 8192 over the zero-padded polynomial
-        NttParams q = nttPass1(8192, 64, 128, kFieldElementsPerExtBlob, kFieldElementsPerExtBlob);
-        recordNtt(cmd, p, p->bufWorkA, p->bufPolyExt, p->bufRootsFwd, q, 128, batch);
-        NttParams r = nttPass2(8192, 64, 128, kFieldElementsPerExtBlob, kFieldElementsPerExtBlob);
-        recordNtt(cmd, p, p->bufEvals, p->bufWorkA, p->bufRootsFwd, r, 64, batch);
-
-        struct { uint64_t outAddr, evalsAddr; } pc{p->bufCells.addr, p->bufEvals.addr};
-        dispatch(cmd, p->psoSerializeCells, p->pipelineLayout, pc, kFieldElementsPerExtBlob / 256,
-                batch);
+    // 3. circulant columns and their size-128 transforms
+    {
+        struct { uint64_t coeffsAddr, polyAddr, rootsAddr; } pc{
+            p->bufCoeffs.addr, p->bufPolyExt.addr, p->bufRootsFwd.addr};
+        dispatch(cmd, p->psoBuildCirculant, p->pipelineLayout, pc, kPhaseATerms, batch);
     }
 
-    if (proofs) {
-        mark(); // stamp 1: scalar stage done
-
-        // 4. circulant columns and their size-128 transforms
-        {
-            struct { uint64_t coeffsAddr, polyAddr, rootsAddr; } pc{
-                p->bufCoeffs.addr, p->bufPolyExt.addr, p->bufRootsFwd.addr};
-            dispatch(cmd, p->psoBuildCirculant, p->pipelineLayout, pc, kPhaseATerms, batch);
-        }
-
-        // 5a. phase A scalar pass: recode, histogram, load-order, sort
-        {
-            struct { uint64_t itemsAddr, startsAddr, permAddr, coeffsAddr; } pc{
-                p->bufItems.addr, p->bufStarts.addr, p->bufPerm.addr, p->bufCoeffs.addr};
-            dispatch(cmd, p->psoPhaseASort, p->pipelineLayout, pc, kCirculantSize, batch);
-        }
-
-        // 5b. phase A curve pass: fixed-base bucket MSM
-        {
-            struct { uint64_t bucketsAddr, itemsAddr, startsAddr, permAddr, tableAddr; } pc{
-                p->bufBuckets.addr, p->bufItems.addr, p->bufStarts.addr, p->bufPerm.addr,
-                p->bufTable.addr};
-            dispatch(cmd, p->psoPhaseA, p->pipelineLayout, pc, kCirculantSize, batch);
-        }
-
-        mark(); // stamp 2: phase A done
-        recordReduce(cmd, p, p->bufPoints, kCirculantSize, batch);
-        mark(); // stamp 3: reduce A done
-
-        // 6. doubling ladder over u[j], then to affine for the mixed adds
-        {
-            struct { uint64_t ladderAddr, uAddr; } pc{p->bufLadderJac.addr, p->bufPoints.addr};
-            dispatch(cmd, p->psoLadder, p->pipelineLayout, pc, kCirculantSize / 8, batch);
-        }
-        mark(); // stamp 4: ladder done
-
-        const uint32_t ladderPoints = (uint32_t)batch * kCirculantSize * kLadderPositions;
-        recordNormalize(cmd, p, p->bufLadderAff, p->bufLadderJac, ladderPoints,
-                        inversionChunk(ladderPoints, 32, 128, 8192));
-        mark(); // stamp 5: normalize ladder done
-
-        // 7. phase B: the fused circulant map
-        {
-            struct { uint64_t outAddr, ladderAddr, itemsAddr, offsetsAddr, permAddr; } pc{
-                p->bufBuckets.addr, p->bufLadderAff.addr, p->bufKernelItems.addr,
-                p->bufKernelOffsets.addr, p->bufKernelPerm.addr};
-            dispatch(cmd, p->psoPhaseB, p->pipelineLayout, pc, kCirculantSize, batch);
-        }
-        mark(); // stamp 6: phase B done
-        recordReduce(cmd, p, p->bufProofs, kCirculantSize, batch);
-        mark(); // stamp 7: reduce B done
-
-        // 8. proofs -> affine -> compressed bytes
-        const uint32_t proofPoints = (uint32_t)batch * kCirculantSize;
-        recordNormalize(cmd, p, p->bufProofsAff, p->bufProofs, proofPoints,
-                        inversionChunk(proofPoints, 4, 32, 2048));
-        mark(); // stamp 8: normalize proofs done
-
-        {
-            struct { uint64_t outAddr, affineAddr; } pc{p->bufProofBytes.addr, p->bufProofsAff.addr};
-            dispatch(cmd, p->psoCompress, p->pipelineLayout, pc, kCirculantSize / 64, batch);
-        }
-        mark(); // stamp 9: compress done
+    // 4a. phase A scalar pass: recode, histogram, load-order, sort
+    {
+        struct { uint64_t itemsAddr, startsAddr, permAddr, coeffsAddr; } pc{
+            p->bufItems.addr, p->bufStarts.addr, p->bufPerm.addr, p->bufCoeffs.addr};
+        dispatch(cmd, p->psoPhaseASort, p->pipelineLayout, pc, kCirculantSize, batch);
     }
+
+    // 4b. phase A curve pass: fixed-base bucket MSM
+    {
+        struct { uint64_t bucketsAddr, itemsAddr, startsAddr, permAddr, tableAddr; } pc{
+            p->bufBuckets.addr, p->bufItems.addr, p->bufStarts.addr, p->bufPerm.addr,
+            p->bufTable.addr};
+        dispatch(cmd, p->psoPhaseA, p->pipelineLayout, pc, kCirculantSize, batch);
+    }
+
+    mark(); // stamp 2: phase A done
+    recordReduce(cmd, p, p->bufPoints, kCirculantSize, batch);
+    mark(); // stamp 3: reduce A done
+
+    // 5. doubling ladder over u[j], then to affine for the mixed adds
+    {
+        struct { uint64_t ladderAddr, uAddr; } pc{p->bufLadderJac.addr, p->bufPoints.addr};
+        dispatch(cmd, p->psoLadder, p->pipelineLayout, pc, kCirculantSize / 8, batch);
+    }
+    mark(); // stamp 4: ladder done
+
+    const uint32_t ladderPoints = (uint32_t)batch * kCirculantSize * kLadderPositions;
+    recordNormalize(cmd, p, p->bufLadderAff, p->bufLadderJac, ladderPoints,
+                    inversionChunk(ladderPoints, 32, 128, 8192));
+    mark(); // stamp 5: normalize ladder done
+
+    // 6. phase B: the fused circulant map
+    {
+        struct { uint64_t outAddr, ladderAddr, itemsAddr, offsetsAddr, permAddr; } pc{
+            p->bufBuckets.addr, p->bufLadderAff.addr, p->bufKernelItems.addr,
+            p->bufKernelOffsets.addr, p->bufKernelPerm.addr};
+        dispatch(cmd, p->psoPhaseB, p->pipelineLayout, pc, kCirculantSize, batch);
+    }
+    mark(); // stamp 6: phase B done
+    recordReduce(cmd, p, p->bufProofs, kCirculantSize, batch);
+    mark(); // stamp 7: reduce B done
+
+    // 7. proofs -> affine -> compressed bytes
+    const uint32_t proofPoints = (uint32_t)batch * kCirculantSize;
+    recordNormalize(cmd, p, p->bufProofsAff, p->bufProofs, proofPoints,
+                    inversionChunk(proofPoints, 4, 32, 2048));
+    mark(); // stamp 8: normalize proofs done
+
+    {
+        struct { uint64_t outAddr, affineAddr; } pc{p->bufProofBytes.addr, p->bufProofsAff.addr};
+        dispatch(cmd, p->psoCompress, p->pipelineLayout, pc, kCirculantSize / 64, batch);
+    }
+    mark(); // stamp 9: compress done
 
     vkEndCommandBuffer(cmd);
 
@@ -822,53 +795,42 @@ vkp_result computeBatch(vkp_prover *p, uint8_t *cells, uint8_t *proofs, const ui
 
     if (*(uint32_t *)p->bufErr.mapped != 0) return VKP_ERR_INVALID_BLOB;
 
-    if (proofs) {
-        uint64_t stamps[10] = {0};
-        vkGetQueryPoolResults(p->device, p->queryPool, 0, stamp, sizeof(stamps), stamps,
-                              sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-        st.scalar_stage = readStamp(p, 1, stamps) - readStamp(p, 0, stamps);
-        st.phase_a = readStamp(p, 2, stamps) - readStamp(p, 1, stamps);
-        st.reduce_a = readStamp(p, 3, stamps) - readStamp(p, 2, stamps);
-        st.ladder = readStamp(p, 4, stamps) - readStamp(p, 3, stamps);
-        st.normalize_ladder = readStamp(p, 5, stamps) - readStamp(p, 4, stamps);
-        st.phase_b = readStamp(p, 6, stamps) - readStamp(p, 5, stamps);
-        st.reduce_b = readStamp(p, 7, stamps) - readStamp(p, 6, stamps);
-        st.normalize_proofs = readStamp(p, 8, stamps) - readStamp(p, 7, stamps);
-        st.compress = readStamp(p, 9, stamps) - readStamp(p, 8, stamps);
-    }
+    uint64_t stamps[10] = {0};
+    vkGetQueryPoolResults(p->device, p->queryPool, 0, stamp, sizeof(stamps), stamps,
+                          sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+    st.scalar_stage = readStamp(p, 1, stamps) - readStamp(p, 0, stamps);
+    st.phase_a = readStamp(p, 2, stamps) - readStamp(p, 1, stamps);
+    st.reduce_a = readStamp(p, 3, stamps) - readStamp(p, 2, stamps);
+    st.ladder = readStamp(p, 4, stamps) - readStamp(p, 3, stamps);
+    st.normalize_ladder = readStamp(p, 5, stamps) - readStamp(p, 4, stamps);
+    st.phase_b = readStamp(p, 6, stamps) - readStamp(p, 5, stamps);
+    st.reduce_b = readStamp(p, 7, stamps) - readStamp(p, 6, stamps);
+    st.normalize_proofs = readStamp(p, 8, stamps) - readStamp(p, 7, stamps);
+    st.compress = readStamp(p, 9, stamps) - readStamp(p, 8, stamps);
 
-    if (cells) {
-        memcpy(cells, p->bufCells.mapped, (size_t)batch * kFieldElementsPerExtBlob * 32);
-    }
-    if (proofs) {
-        memcpy(proofs, p->bufProofBytes.mapped, (size_t)batch * kCirculantSize * VKP_BYTES_PER_PROOF);
-    }
+    memcpy(proofs, p->bufProofBytes.mapped, (size_t)batch * kCirculantSize * VKP_BYTES_PER_PROOF);
     st.total = nowMs() - tStart;
     return VKP_OK;
 }
 
 } // namespace
 
-vkp_result vkp_compute_cells_and_proofs(vkp_prover *p, uint8_t *cells, uint8_t *proofs,
-                                            const uint8_t *blob) {
-    return vkp_compute_cells_and_proofs_batch(p, cells, proofs, blob, 1);
+vkp_result vkp_compute_proofs(vkp_prover *p, uint8_t *proofs, const uint8_t *blob) {
+    return vkp_compute_proofs_batch(p, proofs, blob, 1);
 }
 
-vkp_result vkp_compute_cells_and_proofs_batch(vkp_prover *p, uint8_t *cells, uint8_t *proofs,
-                                                  const uint8_t *blobs, size_t num_blobs) {
-    if (!p || !blobs) return VKP_ERR_BADARGS;
-    if (!cells && !proofs) return VKP_ERR_BADARGS;
+vkp_result vkp_compute_proofs_batch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs,
+                                        size_t num_blobs) {
+    if (!p || !blobs || !proofs) return VKP_ERR_BADARGS;
     if (num_blobs == 0) return VKP_OK;
 
     std::lock_guard<std::mutex> lock(p->mutex);
-    const size_t cellBytes = (size_t)kCirculantSize * VKP_BYTES_PER_CELL;
     const size_t proofBytes = (size_t)kCirculantSize * VKP_BYTES_PER_PROOF;
 
     for (size_t done = 0; done < num_blobs;) {
         const uint32_t batch = (uint32_t)std::min<size_t>(p->maxBatch, num_blobs - done);
-        vkp_result rc = computeBatch(p, cells ? cells + done * cellBytes : nullptr,
-                                       proofs ? proofs + done * proofBytes : nullptr,
-                                       blobs + done * VKP_BYTES_PER_BLOB, batch);
+        vkp_result rc = computeBatch(p, proofs + done * proofBytes, blobs + done * VKP_BYTES_PER_BLOB,
+                                       batch);
         if (rc != VKP_OK) return rc;
         done += batch;
     }
@@ -884,11 +846,11 @@ vkp_result vkp_compute_cells_and_proofs_batch(vkp_prover *p, uint8_t *cells, uin
 
 namespace vkp {
 
-vkp_result profile_batch(vkp_prover *p, unsigned char *cells, unsigned char *proofs,
-                           const unsigned char *blobs, unsigned batch, StageTimes &out) {
+vkp_result profile_batch(vkp_prover *p, unsigned char *proofs, const unsigned char *blobs,
+                           unsigned batch, StageTimes &out) {
     if (!p || !blobs) return VKP_ERR_BADARGS;
     std::lock_guard<std::mutex> lock(p->mutex);
-    const vkp_result rc = computeBatch(p, cells, proofs, blobs, batch);
+    const vkp_result rc = computeBatch(p, proofs, blobs, batch);
     out = p->lastStage;
     return rc;
 }

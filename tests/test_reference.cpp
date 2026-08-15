@@ -4,7 +4,7 @@
 // Two things get proven here:
 //   1. the fused circulant kernel is *equivalent* to c-kzg's
 //      "G1 inverse transform, truncate, forward transform", and
-//   2. the whole pipeline reproduces the official cells and proofs.
+//   2. the whole pipeline reproduces the official cell proofs.
 #include "../src/cpu/reference.h"
 #include "../src/cpu/setup.h"
 #include "../src/setup_data.h"
@@ -106,13 +106,13 @@ int main(int argc, char **argv) {
 
     int passed = 0;
     for (const auto &v : vectors) {
-        std::vector<uint8_t> cells(128 * 2048), proofs(128 * 48);
+        std::vector<uint8_t> proofs(128 * 48);
         double a = now_ms();
         // The library takes a fixed-size blob buffer, so a wrong length is the
         // caller's error to catch -- two of the spec vectors exercise exactly
         // that, and the harness stands in for the caller here.
         vkp_result rc = v.blob.size() == (size_t)kFieldElementsPerBlob * kBytesPerFieldElement
-                              ? reference_compute(tables, v.blob.data(), cells.data(), proofs.data())
+                              ? reference_compute(tables, v.blob.data(), proofs.data())
                               : VKP_ERR_BADARGS;
         double ms = now_ms() - a;
 
@@ -130,26 +130,14 @@ int main(int argc, char **argv) {
             g_failures++;
             continue;
         }
-        bool cells_ok = memcmp(cells.data(), v.cells.data(), cells.size()) == 0;
         bool proofs_ok = memcmp(proofs.data(), v.proofs.data(), proofs.size()) == 0;
-        if (!cells_ok || !proofs_ok) {
-            printf("FAIL %s: cells %s, proofs %s\n", v.name.c_str(), cells_ok ? "ok" : "MISMATCH",
-                   proofs_ok ? "ok" : "MISMATCH");
-            if (!proofs_ok) {
-                for (int i = 0; i < 128; i++) {
-                    if (memcmp(&proofs[i * 48], &v.proofs[i * 48], 48) != 0) {
-                        printf("   first bad proof %d:\n     got %s\n     want %s\n", i,
-                               hex(&proofs[i * 48], 48).c_str(), hex(&v.proofs[i * 48], 48).c_str());
-                        break;
-                    }
-                }
-            }
-            if (!cells_ok) {
-                for (int i = 0; i < 128; i++) {
-                    if (memcmp(&cells[i * 2048], &v.cells[i * 2048], 2048) != 0) {
-                        printf("   first bad cell %d\n", i);
-                        break;
-                    }
+        if (!proofs_ok) {
+            printf("FAIL %s: proofs MISMATCH\n", v.name.c_str());
+            for (int i = 0; i < 128; i++) {
+                if (memcmp(&proofs[i * 48], &v.proofs[i * 48], 48) != 0) {
+                    printf("   first bad proof %d:\n     got %s\n     want %s\n", i,
+                           hex(&proofs[i * 48], 48).c_str(), hex(&v.proofs[i * 48], 48).c_str());
+                    break;
                 }
             }
             g_failures++;

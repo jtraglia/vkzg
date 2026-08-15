@@ -2,7 +2,7 @@
  * vulkan-prover -- EIP-7594 cell KZG proof generation on the GPU via Vulkan.
  *
  * The whole pipeline runs on the GPU: one command buffer per call, with the
- * host doing nothing but copying blobs in and cells/proofs out.  That is
+ * host doing nothing but copying blobs in and proofs out.  That is
  * deliberate -- on a headless node the GPU is idle while the CPU has real work
  * to do, so spending CPU cycles here would be taking them from something else.
  *
@@ -11,8 +11,9 @@
  * unless stated otherwise; a single `vkp_prover` may be shared between
  * threads, and concurrent calls are serialised internally per GPU queue.
  *
- * This library only *produces* cells and proofs.  Verification is deliberately
- * out of scope.
+ * This library only *produces* cell proofs -- not the cells themselves
+ * (computing cells from a blob is cheap on a CPU and out of scope here) and
+ * not verification.
  */
 #ifndef VULKAN_PROVER_H
 #define VULKAN_PROVER_H
@@ -27,12 +28,9 @@ extern "C" {
 /* ------------------------------------------------------------------ sizes */
 
 #define VKP_FIELD_ELEMENTS_PER_BLOB 4096
-#define VKP_FIELD_ELEMENTS_PER_EXT_BLOB 8192
-#define VKP_FIELD_ELEMENTS_PER_CELL 64
-#define VKP_CELLS_PER_EXT_BLOB 128
+#define VKP_NUM_CELL_PROOFS 128
 #define VKP_BYTES_PER_FIELD_ELEMENT 32
 #define VKP_BYTES_PER_BLOB (VKP_FIELD_ELEMENTS_PER_BLOB * VKP_BYTES_PER_FIELD_ELEMENT)
-#define VKP_BYTES_PER_CELL (VKP_FIELD_ELEMENTS_PER_CELL * VKP_BYTES_PER_FIELD_ELEMENT)
 #define VKP_BYTES_PER_PROOF 48
 /* Number of G1 points in the monomial-form trusted setup we consume. */
 #define VKP_NUM_SETUP_G1_POINTS VKP_FIELD_ELEMENTS_PER_BLOB
@@ -115,28 +113,22 @@ const char *vkp_prover_device_name(const vkp_prover *p);
 /* ---------------------------------------------------------------- compute */
 
 /*
- * Compute all 128 cells and all 128 cell proofs for one blob.
+ * Compute all 128 cell proofs for one blob.
  *
  * `blob`   is VKP_BYTES_PER_BLOB bytes: 4096 big-endian canonical field
  *          elements.
- * `cells`  receives VKP_CELLS_PER_EXT_BLOB * VKP_BYTES_PER_CELL bytes, or
- *          NULL if the caller only wants proofs.
- * `proofs` receives VKP_CELLS_PER_EXT_BLOB * VKP_BYTES_PER_PROOF bytes, or
- *          NULL if the caller only wants cells.
- *
- * At least one of `cells` and `proofs` must be non-NULL.
+ * `proofs` receives VKP_NUM_CELL_PROOFS * VKP_BYTES_PER_PROOF bytes.
  */
-vkp_result vkp_compute_cells_and_proofs(vkp_prover *p, uint8_t *cells, uint8_t *proofs,
-                                            const uint8_t *blob);
+vkp_result vkp_compute_proofs(vkp_prover *p, uint8_t *proofs, const uint8_t *blob);
 
 /*
- * Batched form.  `blobs` is `num_blobs` consecutive blobs; `cells` and
- * `proofs` are the corresponding consecutive output arrays.  Batching keeps
- * the GPU saturated and is markedly more efficient per blob than repeated
- * single calls -- this is the entry point supernodes should use.
+ * Batched form.  `blobs` is `num_blobs` consecutive blobs; `proofs` is the
+ * corresponding consecutive output array.  Batching keeps the GPU saturated
+ * and is markedly more efficient per blob than repeated single calls -- this
+ * is the entry point supernodes should use.
  */
-vkp_result vkp_compute_cells_and_proofs_batch(vkp_prover *p, uint8_t *cells, uint8_t *proofs,
-                                                  const uint8_t *blobs, size_t num_blobs);
+vkp_result vkp_compute_proofs_batch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs,
+                                        size_t num_blobs);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -10,7 +10,7 @@
 namespace vkp {
 
 struct StageTimes {
-    double scalar_stage = 0; // blob deserialise, both NTTs, cells, circulant
+    double scalar_stage = 0; // blob deserialise, inverse NTT, circulant
     double phase_a = 0;      // recode/sort + fixed-base bucket MSM
     double reduce_a = 0;
     double ladder = 0;
@@ -23,7 +23,7 @@ struct StageTimes {
 };
 
 // Runs the normal compute path and reports what it measured.
-vkp_result profile_batch(vkp_prover *p, unsigned char *cells, unsigned char *proofs,
-                           const unsigned char *blobs, unsigned batch, StageTimes &out);
+vkp_result profile_batch(vkp_prover *p, unsigned char *proofs, const unsigned char *blobs,
+                           unsigned batch, StageTimes &out);
 
 } // namespace vkp

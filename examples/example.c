@@ -1,5 +1,5 @@
 /*
- * Minimal end-to-end example: build a prover and compute the cells and cell
+ * Minimal end-to-end example: build a prover and compute the 128 cell
  * proofs for one blob.  The mainnet trusted setup is compiled into the
  * library, so there is no file to load and no path to configure.
  *
@@ -39,23 +39,20 @@ int main(void) {
         fe[0] = 0;
     }
 
-    uint8_t *cells = malloc((size_t)VKP_CELLS_PER_EXT_BLOB * VKP_BYTES_PER_CELL);
-    uint8_t *proofs = malloc((size_t)VKP_CELLS_PER_EXT_BLOB * VKP_BYTES_PER_PROOF);
+    uint8_t *proofs = malloc((size_t)VKP_NUM_CELL_PROOFS * VKP_BYTES_PER_PROOF);
 
-    rc = vkp_compute_cells_and_proofs(prover, cells, proofs, blob);
+    rc = vkp_compute_proofs(prover, proofs, blob);
     if (rc != VKP_OK) {
         fprintf(stderr, "compute failed: %s\n", vkp_error_string(rc));
         return 1;
     }
 
-    printf("produced %d cells and %d proofs\n", VKP_CELLS_PER_EXT_BLOB,
-           VKP_CELLS_PER_EXT_BLOB);
+    printf("produced %d cell proofs\n", VKP_NUM_CELL_PROOFS);
     printf("proof[0] = ");
     for (int i = 0; i < VKP_BYTES_PER_PROOF; i++) printf("%02x", proofs[i]);
     printf("\n");
 
     free(blob);
-    free(cells);
     free(proofs);
     vkp_prover_free(prover);
     return 0;

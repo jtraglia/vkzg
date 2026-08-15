@@ -46,26 +46,21 @@ int main(int argc, char **argv) {
     }
     printf("device: %s   setup: %.0f ms\n\n", vkp_prover_device_name(p), now_ms() - t0);
 
-    const size_t cellBytes = (size_t)VKP_CELLS_PER_EXT_BLOB * VKP_BYTES_PER_CELL;
-    const size_t proofBytes = (size_t)VKP_CELLS_PER_EXT_BLOB * VKP_BYTES_PER_PROOF;
+    const size_t proofBytes = (size_t)VKP_NUM_CELL_PROOFS * VKP_BYTES_PER_PROOF;
 
     std::vector<uint8_t> blobs((size_t)maxBatch * VKP_BYTES_PER_BLOB);
     for (uint32_t i = 0; i < maxBatch; i++) {
         fill_blob(&blobs[(size_t)i * VKP_BYTES_PER_BLOB], i + 1);
     }
-    std::vector<uint8_t> cells((size_t)maxBatch * cellBytes);
     std::vector<uint8_t> proofs((size_t)maxBatch * proofBytes);
 
-    auto run = [&](const char *label, uint32_t n, bool wantCells, bool wantProofs) {
+    auto run = [&](const char *label, uint32_t n) {
         // warm up
-        vkp_compute_cells_and_proofs_batch(p, wantCells ? cells.data() : nullptr,
-                                             wantProofs ? proofs.data() : nullptr, blobs.data(), n);
+        vkp_compute_proofs_batch(p, proofs.data(), blobs.data(), n);
         double best = 1e30, total = 0;
         for (int r = 0; r < reps; r++) {
             double a = now_ms();
-            vkp_result e = vkp_compute_cells_and_proofs_batch(
-                p, wantCells ? cells.data() : nullptr, wantProofs ? proofs.data() : nullptr,
-                blobs.data(), n);
+            vkp_result e = vkp_compute_proofs_batch(p, proofs.data(), blobs.data(), n);
             double ms = now_ms() - a;
             if (e != VKP_OK) {
                 printf("  %s: error %s\n", label, vkp_error_string(e));
@@ -79,15 +74,13 @@ int main(int argc, char **argv) {
     };
 
     printf("single blob\n");
-    run("cells + proofs", 1, true, true);
-    run("proofs only", 1, false, true);
-    run("cells only", 1, true, false);
+    run("1 blob", 1);
 
-    printf("\nbatched (cells + proofs)\n");
+    printf("\nbatched\n");
     for (uint32_t n = 1; n <= maxBatch; n *= 2) {
         char label[64];
         snprintf(label, sizeof(label), "%u blob%s", n, n == 1 ? "" : "s");
-        run(label, n, true, true);
+        run(label, n);
     }
 
     vkp_prover_free(p);

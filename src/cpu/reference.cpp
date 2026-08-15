@@ -183,42 +183,28 @@ void phase_b_via_g1_ffts(G1 *out, const G1 *u, const SetupTables &tables) {
     memcpy(out, v.data(), sizeof(G1) * kCirculantSize);
 }
 
-vkp_result reference_compute(const SetupTables &tables, const uint8_t *blob, uint8_t *cells,
-                               uint8_t *proofs) {
+vkp_result reference_compute(const SetupTables &tables, const uint8_t *blob, uint8_t *proofs) {
     std::vector<Fr> poly(kFieldElementsPerBlob);
     vkp_result rc = blob_to_polynomial(poly.data(), blob, tables);
     if (rc != VKP_OK) return rc;
 
-    if (cells) {
-        std::vector<Fr> ext(kFieldElementsPerExtBlob);
-        memcpy(ext.data(), poly.data(), sizeof(Fr) * kFieldElementsPerBlob);
-        for (int i = kFieldElementsPerBlob; i < kFieldElementsPerExtBlob; i++) ext[i] = kFrZero;
-        fr_fft_fwd(ext.data(), kFieldElementsPerExtBlob, tables);
-        for (int i = 0; i < kFieldElementsPerExtBlob; i++) {
-            uint32_t dst = bit_reverse((uint32_t)i, 13);
-            fr_to_bytes(cells + (size_t)dst * kBytesPerFieldElement, ext[i]);
-        }
-    }
+    auto coeffs = new Fr[kCirculantSize][kPhaseATerms];
+    build_circulant_coeffs(coeffs, poly.data(), tables);
 
-    if (proofs) {
-        auto coeffs = new Fr[kCirculantSize][kPhaseATerms];
-        build_circulant_coeffs(coeffs, poly.data(), tables);
+    std::vector<G1> u(kCirculantSize);
+    phase_a_msm(u.data(), coeffs, tables);
+    delete[] coeffs;
 
-        std::vector<G1> u(kCirculantSize);
-        phase_a_msm(u.data(), coeffs, tables);
-        delete[] coeffs;
+    std::vector<G1> pr(kCirculantSize);
+    phase_b_circulant(pr.data(), u.data(), tables);
 
-        std::vector<G1> pr(kCirculantSize);
-        phase_b_circulant(pr.data(), u.data(), tables);
-
-        // Bit-reverse into cell order, then serialise.
-        std::vector<G1> brp(kCirculantSize);
-        for (int i = 0; i < kCirculantSize; i++) brp[bit_reverse((uint32_t)i, 7)] = pr[i];
-        std::vector<G1Affine> aff(kCirculantSize);
-        g1_batch_to_affine(aff.data(), brp.data(), kCirculantSize);
-        for (int i = 0; i < kCirculantSize; i++) {
-            g1_compress(proofs + (size_t)i * kBytesPerProof, aff[i]);
-        }
+    // Bit-reverse into cell order, then serialise.
+    std::vector<G1> brp(kCirculantSize);
+    for (int i = 0; i < kCirculantSize; i++) brp[bit_reverse((uint32_t)i, 7)] = pr[i];
+    std::vector<G1Affine> aff(kCirculantSize);
+    g1_batch_to_affine(aff.data(), brp.data(), kCirculantSize);
+    for (int i = 0; i < kCirculantSize; i++) {
+        g1_compress(proofs + (size_t)i * kBytesPerProof, aff[i]);
     }
     return VKP_OK;
 }

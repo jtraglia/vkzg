@@ -28,7 +28,7 @@ set(GEN_SHADER_SOURCE  ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/shader_source.h)
 
 set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders)
 set(KERNEL_NAMES
-    k_blob_to_fr k_ntt_pass k_serialize_cells k_build_circulant
+    k_blob_to_fr k_ntt_pass k_build_circulant
     k_phase_a_sort k_phase_a k_phase_b k_ladder k_normalize
     k_compress_proofs k_bucket_reduce)
 set(KERNEL_SOURCES "")

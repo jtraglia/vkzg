@@ -3,13 +3,15 @@
 EIP-7594 cell KZG proof generation for Ethereum blobs, on the GPU via Vulkan
 compute.
 
-Given a blob, `vulkan-prover` produces all 128 cells and all 128 cell proofs.
-It is built for supernodes, which generate proofs constantly and care about
-throughput. Proof *verification* is deliberately out of scope — this library
-only produces.
+Given a blob, `vulkan-prover` produces all 128 cell proofs. It is built for
+supernodes, which generate proofs constantly and care about throughput.
+Computing the cells themselves (as opposed to their proofs) is cheap on a CPU
+and deliberately out of scope here, as is proof *verification* — this
+library only produces proofs.
 
 Verified against every `compute_cells_and_kzg_proofs` vector in the consensus
-spec test suite, cells and proofs byte-for-byte.
+spec test suite, proofs byte-for-byte (the same vectors also carry expected
+cells, which this library doesn't compute and so doesn't check).
 
 This project started as `metal-prover`, targeting Apple's Metal API on
 macOS. It has since been rewritten for Linux: the whole GPU pipeline (NTTs,
@@ -28,30 +30,46 @@ one: an Apple M1 running Asahi Linux, through Mesa's "Honeykrisp" driver
 
 Everything runs on the GPU. One command buffer per call, with a full
 pipeline barrier between dispatches; the host only copies blobs in and
-cells/proofs out.
+proofs out.
 
 Apple M1, 8 GPU cores, Fedora Asahi Remix, Mesa 26.1.6 (Honeykrisp):
 
 | | ms/blob | blobs/s |
 |---|---|---|
-| batch 1 | 111.2 | 9.0 |
-| batch 8 | 63.7 | 15.7 |
-| batch 16 | 62.1 | 16.1 |
-| batch 32 | 60.8 | 16.5 |
-| **batch 64** | **60.1** | **16.6** |
+| batch 1 | 110.6 | 9.0 |
+| batch 8 | 63.5 | 15.8 |
+| batch 16 | 61.0 | 16.4 |
+| batch 32 | 60.5 | 16.5 |
+| **batch 64** | **59.7** | **16.8** |
 
-Cells alone (no proofs) are 0.83 ms/blob.
+An Apple M1 Ultra (64 GPU cores), same driver stack, on the same real
+hardware — not extrapolated:
 
-**This is not the Metal number for the same silicon**, and the two aren't
+| | ms/blob | blobs/s |
+|---|---|---|
+| batch 1 | 119.2 | 8.4 |
+| batch 8 | 21.6 | 46.2 |
+| batch 16 | 15.0 | 66.7 |
+| batch 32 | 12.3 | 81.1 |
+| **batch 64** | **11.9** | **83.9** |
+
+8× the GPU cores buys ~5× the throughput at batch 64 (60→12 ms/blob), not
+8×: some stages (the ladder, the batched inversions) are latency-bound
+rather than throughput-bound, so they don't scale with core count the way
+the two MSM phases do — see [How it works](#how-it-works-and-why-it-looks-like-this).
+It also means small batches leave far more of a 64-core part idle: batch 1
+is 10× slower per blob than batch 64 on the Ultra, versus under 2× on the
+8-core M1.
+
+**Neither number is the Metal number for the same silicon**, and they aren't
 directly comparable: the old `metal-prover` measured 46.8 ms/blob (21.4
-blobs/s) at batch 64 on the same M1 through Metal. Some of the gap is a
+blobs/s) at batch 64 on the 8-core M1 through Metal. Some of the gap is a
 Vulkan tax that's inherent to this design (a `vkCmdPipelineBarrier` after
 every dispatch, where Metal's single-encoder hazard tracking inserted
 narrower barriers automatically), and some of it is very likely tuning that
 carried over unexamined from the Metal version rather than being re-derived
 for this driver — see [Checking the tuning](#checking-the-tuning-on-your-own-gpu)
-below. Nobody has gone through that exercise for Vulkan/Honeykrisp yet; this
-is the correctness-first port, not the tuned one.
+below.
 
 ### Batching
 
@@ -90,11 +108,11 @@ opts.max_batch_size = 16;
 vkp_prover *prover;
 vkp_prover_new_default(&prover, &opts);   /* mainnet setup is compiled in */
 
-/* one blob */
-vkp_compute_cells_and_proofs(prover, cells, proofs, blob);
+/* one blob -> 128 cell proofs */
+vkp_compute_proofs(prover, proofs, blob);
 
 /* or a batch, which is markedly more efficient per blob */
-vkp_compute_cells_and_proofs_batch(prover, cells, proofs, blobs, n);
+vkp_compute_proofs_batch(prover, proofs, blobs, n);
 ```
 
 The whole API is in [`include/vulkan_prover.h`](include/vulkan_prover.h) and is plain C, so
@@ -181,7 +199,6 @@ with the two-transform form on all 128 outputs.
 ```
 blob → F_r, bit-reversed                  GPU
 inverse NTT 4096 → monomial coefficients  GPU   (four-step, 2 dispatches)
-forward NTT 8192 → cells                  GPU
 64 circulant columns, each NTT-128        GPU
 phase A: fixed-base bucket MSM            GPU
 doubling ladder 2^(8d)·u[j]               GPU
@@ -189,6 +206,11 @@ ladder → affine (batched inversion)       GPU
 phase B: the fused circulant map          GPU
 proofs → affine → compressed              GPU
 ```
+
+(An earlier version of this pipeline also computed the 128 cells themselves
+— a forward NTT of size 8192 plus a serialisation kernel. That's gone: this
+library only produces proofs, and cell computation is cheap enough on a CPU
+that it didn't belong in a GPU-focused library.)
 
 Both MSM phases use a signed-digit window of 8 bits: 32 digits, 128 buckets.
 Phase A's bases are fixed, so the setup precomputes `2^(8d)·P` for every base
@@ -327,9 +349,9 @@ cannot drift.
   which matters most at small batch where the ladder is latency-bound. The
   host-side pieces (`glv_split`, the endomorphism) are implemented and tested;
   the phase B kernel does not use them yet.
-- **`recover_cells_and_kzg_proofs`** is the natural next entry point for
-  supernodes. The expensive half of it is exactly the proof computation this
-  library already does; what is missing is the erasure-recovery step.
+
+This library deliberately does not compute cells or do erasure recovery —
+both are cheap on a CPU and out of scope for a GPU-focused proof generator.
 
 ## License
 

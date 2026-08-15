@@ -1,6 +1,7 @@
 // Per-stage GPU timing (development tool).  Runs the real dispatch sequence
-// with the command buffer flushed at stage boundaries, so each figure includes
-// a little submission overhead but attributes time correctly.
+// in a single command buffer with timestamp queries embedded at each stage
+// boundary, so the numbers reflect actual GPU time with no extra submission
+// overhead per stage.
 #include "../include/vulkan_prover.h"
 #include "../src/profile.h"
 
@@ -30,20 +31,20 @@ int main(int argc, char **argv) {
 
     std::vector<uint8_t> blobs((size_t)batch * VKP_BYTES_PER_BLOB);
     for (unsigned i = 0; i < batch; i++) fill_blob(&blobs[(size_t)i * VKP_BYTES_PER_BLOB], i + 1);
-    std::vector<uint8_t> cells((size_t)batch * 128 * 2048), proofs((size_t)batch * 128 * 48);
+    std::vector<uint8_t> proofs((size_t)batch * 128 * 48);
 
     vkp::StageTimes best;
     bool first = true;
     for (int r = 0; r < reps; r++) {
         vkp::StageTimes t;
-        if (vkp::profile_batch(p, cells.data(), proofs.data(), blobs.data(), batch, t) != VKP_OK) {
+        if (vkp::profile_batch(p, proofs.data(), blobs.data(), batch, t) != VKP_OK) {
             printf("compute failed\n");
             return 1;
         }
         if (first || t.total < best.total) { best = t; first = false; }
     }
 
-    printf("batch = %u   (stage-split; each figure includes ~0.1ms submission)\n\n", batch);
+    printf("batch = %u\n\n", batch);
     struct { const char *n; double v; } rows[] = {
         {"scalar stage (NTTs)", best.scalar_stage},
         {"phase A  (sort + MSM)", best.phase_a},
