@@ -1,9 +1,10 @@
 /*
- * Minimal end-to-end example: load a trusted setup, build a prover, and compute
- * the cells and cell proofs for a blob.
+ * Minimal end-to-end example: build a prover and compute the cells and cell
+ * proofs for one blob.  The mainnet trusted setup is compiled into the
+ * library, so there is no file to load and no path to configure.
  *
  * Build:  cmake -B build && cmake --build build
- * Run:    ./build/kzgpu_example data/trusted_setup.txt
+ * Run:    ./build/kzgpu_example
  */
 #include "kzgpu.h"
 
@@ -11,18 +12,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-int main(int argc, char **argv) {
-    const char *setup_path = argc > 1 ? argv[1] : "data/trusted_setup.txt";
-
+int main(void) {
     kzgpu_options opts;
     kzgpu_options_default(&opts);
-    /* Deriving the FK20 tables takes about a second; cache them next to the
-     * setup so subsequent starts are instant. */
+    /* Deriving the FK20 tables from the setup takes about a second; caching
+     * them brings subsequent starts down to ~60ms. */
     opts.table_cache_path = "/tmp/kzgpu_tables.cache";
-    opts.max_batch_size = 8;
+    opts.max_batch_size = 16; /* batch to keep the GPU busy; see the README */
 
     kzgpu_prover *prover = NULL;
-    kzgpu_result rc = kzgpu_prover_new_from_file(&prover, setup_path, &opts);
+    kzgpu_result rc = kzgpu_prover_new_default(&prover, &opts);
     if (rc != KZGPU_OK) {
         fprintf(stderr, "failed to create prover: %s\n", kzgpu_error_string(rc));
         return 1;
