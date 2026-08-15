@@ -3,11 +3,11 @@
 // Not part of the public API.  Recorded by the real compute path.
 #pragma once
 
-#include "../include/kzgpu.h"
+#include "../include/metal_prover.h"
 
 #include <cstddef>
 
-namespace kzgpu {
+namespace mp {
 
 struct StageTimes {
     double scalar_stage = 0; // blob deserialise, both NTTs, cells, circulant
@@ -23,7 +23,7 @@ struct StageTimes {
 };
 
 // Runs the normal compute path and reports what it measured.
-kzgpu_result profile_batch(kzgpu_prover *p, unsigned char *cells, unsigned char *proofs,
+mp_result profile_batch(mp_prover *p, unsigned char *cells, unsigned char *proofs,
                            const unsigned char *blobs, unsigned batch, StageTimes &out);
 
-} // namespace kzgpu
+} // namespace mp

@@ -1,5 +1,5 @@
 // Latency and throughput benchmark for the GPU prover.
-#include "../include/kzgpu.h"
+#include "../include/metal_prover.h"
 
 #include <algorithm>
 #include <chrono>
@@ -16,7 +16,7 @@ static double now_ms() {
 // Deterministic pseudo-random canonical blobs.
 static void fill_blob(uint8_t *blob, uint64_t seed) {
     uint64_t s = seed * 0x9E3779B97F4A7C15ull + 1;
-    for (int i = 0; i < KZGPU_FIELD_ELEMENTS_PER_BLOB; i++) {
+    for (int i = 0; i < MP_FIELD_ELEMENTS_PER_BLOB; i++) {
         uint8_t *fe = blob + (size_t)i * 32;
         for (int j = 0; j < 32; j++) {
             s ^= s << 13;
@@ -32,43 +32,43 @@ int main(int argc, char **argv) {
     const int reps = argc > 1 ? atoi(argv[1]) : 20;
     const uint32_t maxBatch = argc > 2 ? (uint32_t)atoi(argv[2]) : 8;
 
-    kzgpu_options opts;
-    kzgpu_options_default(&opts);
-    opts.table_cache_path = "/tmp/kzgpu_tables_v3.cache";
+    mp_options opts;
+    mp_options_default(&opts);
+    opts.table_cache_path = "/tmp/mp_prover_tables_v3.cache";
     opts.max_batch_size = maxBatch;
 
-    kzgpu_prover *p = nullptr;
+    mp_prover *p = nullptr;
     double t0 = now_ms();
-    kzgpu_result rc = kzgpu_prover_new_default(&p, &opts);
-    if (rc != KZGPU_OK) {
-        printf("prover_new failed: %s\n", kzgpu_error_string(rc));
+    mp_result rc = mp_prover_new_default(&p, &opts);
+    if (rc != MP_OK) {
+        printf("prover_new failed: %s\n", mp_error_string(rc));
         return 1;
     }
-    printf("device: %s   setup: %.0f ms\n\n", kzgpu_device_name(p), now_ms() - t0);
+    printf("device: %s   setup: %.0f ms\n\n", mp_prover_device_name(p), now_ms() - t0);
 
-    const size_t cellBytes = (size_t)KZGPU_CELLS_PER_EXT_BLOB * KZGPU_BYTES_PER_CELL;
-    const size_t proofBytes = (size_t)KZGPU_CELLS_PER_EXT_BLOB * KZGPU_BYTES_PER_PROOF;
+    const size_t cellBytes = (size_t)MP_CELLS_PER_EXT_BLOB * MP_BYTES_PER_CELL;
+    const size_t proofBytes = (size_t)MP_CELLS_PER_EXT_BLOB * MP_BYTES_PER_PROOF;
 
-    std::vector<uint8_t> blobs((size_t)maxBatch * KZGPU_BYTES_PER_BLOB);
+    std::vector<uint8_t> blobs((size_t)maxBatch * MP_BYTES_PER_BLOB);
     for (uint32_t i = 0; i < maxBatch; i++) {
-        fill_blob(&blobs[(size_t)i * KZGPU_BYTES_PER_BLOB], i + 1);
+        fill_blob(&blobs[(size_t)i * MP_BYTES_PER_BLOB], i + 1);
     }
     std::vector<uint8_t> cells((size_t)maxBatch * cellBytes);
     std::vector<uint8_t> proofs((size_t)maxBatch * proofBytes);
 
     auto run = [&](const char *label, uint32_t n, bool wantCells, bool wantProofs) {
         // warm up
-        kzgpu_compute_cells_and_proofs_batch(p, wantCells ? cells.data() : nullptr,
+        mp_compute_cells_and_proofs_batch(p, wantCells ? cells.data() : nullptr,
                                              wantProofs ? proofs.data() : nullptr, blobs.data(), n);
         double best = 1e30, total = 0;
         for (int r = 0; r < reps; r++) {
             double a = now_ms();
-            kzgpu_result e = kzgpu_compute_cells_and_proofs_batch(
+            mp_result e = mp_compute_cells_and_proofs_batch(
                 p, wantCells ? cells.data() : nullptr, wantProofs ? proofs.data() : nullptr,
                 blobs.data(), n);
             double ms = now_ms() - a;
-            if (e != KZGPU_OK) {
-                printf("  %s: error %s\n", label, kzgpu_error_string(e));
+            if (e != MP_OK) {
+                printf("  %s: error %s\n", label, mp_error_string(e));
                 return;
             }
             best = std::min(best, ms);
@@ -90,6 +90,6 @@ int main(int argc, char **argv) {
         run(label, n, true, true);
     }
 
-    kzgpu_prover_free(p);
+    mp_prover_free(p);
     return 0;
 }

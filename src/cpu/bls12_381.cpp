@@ -4,17 +4,17 @@
 
 #include <cassert>
 
-namespace kzgpu {
+namespace mp {
 namespace {
 
 typedef unsigned __int128 u128;
 
-constexpr uint64_t kP[6] = KZGPU_FP_P;
-constexpr uint64_t kFpN0 = KZGPU_FP_N0;
-constexpr uint64_t kFpR2[6] = KZGPU_FP_R2;
-constexpr uint64_t kR[4] = KZGPU_FR_R_MOD;
-constexpr uint64_t kFrN0 = KZGPU_FR_N0;
-constexpr uint64_t kFrR2[4] = KZGPU_FR_R2;
+constexpr uint64_t kP[6] = MP_FP_P;
+constexpr uint64_t kFpN0 = MP_FP_N0;
+constexpr uint64_t kFpR2[6] = MP_FP_R2;
+constexpr uint64_t kR[4] = MP_FR_R_MOD;
+constexpr uint64_t kFrN0 = MP_FR_N0;
+constexpr uint64_t kFrR2[4] = MP_FR_R2;
 
 // ---------------------------------------------------------------- helpers
 
@@ -193,8 +193,8 @@ bool is_zero_n(const uint64_t *a) {
 // ---------------------------------------------------------------------- Fp
 
 const Fp kFpZero = {{0, 0, 0, 0, 0, 0}};
-const Fp kFpOne = {KZGPU_FP_R};
-const Fp kFpBeta = {KZGPU_FP_BETA};
+const Fp kFpOne = {MP_FP_R};
+const Fp kFpBeta = {MP_FP_BETA};
 
 void fp_add(Fp &r, const Fp &a, const Fp &b) { add_mod_n<6>(r.v, a.v, b.v, kP); }
 void fp_sub(Fp &r, const Fp &a, const Fp &b) { sub_mod_n<6>(r.v, a.v, b.v, kP); }
@@ -229,7 +229,7 @@ void fp_pow_limbs(Fp &r, const Fp &a, const uint64_t *e, int nlimbs) {
 } // namespace
 
 void fp_inv(Fp &r, const Fp &a) {
-    static const uint64_t e[6] = KZGPU_FP_P_MINUS_2;
+    static const uint64_t e[6] = MP_FP_P_MINUS_2;
     fp_pow_limbs(r, a, e, 6);
 }
 
@@ -280,7 +280,7 @@ bool fp_is_lexicographically_largest(const Fp &a) {
 // ---------------------------------------------------------------------- Fr
 
 const Fr kFrZero = {{0, 0, 0, 0}};
-const Fr kFrOne = {KZGPU_FR_ONE};
+const Fr kFrOne = {MP_FR_ONE};
 
 void fr_add(Fr &r, const Fr &a, const Fr &b) { add_mod_n<4>(r.v, a.v, b.v, kR); }
 void fr_sub(Fr &r, const Fr &a, const Fr &b) { sub_mod_n<4>(r.v, a.v, b.v, kR); }
@@ -327,7 +327,7 @@ void fr_to_bytes(uint8_t out[32], const Fr &a) {
 
 
 void fr_inv(Fr &r, const Fr &a) {
-    static const uint64_t e[4] = KZGPU_FR_R_MINUS_2;
+    static const uint64_t e[4] = MP_FR_R_MINUS_2;
     Fr acc = kFrOne;
     bool started = false;
     for (int i = 3; i >= 0; i--) {
@@ -348,7 +348,7 @@ void fr_inv(Fr &r, const Fr &a) {
 
 void fr_root_of_unity(Fr &r, size_t log_order) {
     assert(log_order <= 13);
-    Fr root = {KZGPU_FR_ROOT_8192}; // primitive 2^13-th root
+    Fr root = {MP_FR_ROOT_8192}; // primitive 2^13-th root
     for (size_t i = log_order; i < 13; i++) fr_sqr(root, root);
     r = root;
 }
@@ -640,7 +640,7 @@ bool g1_affine_in_subgroup(const G1Affine &p) {
     g1_from_affine(jp, p);
     g1_from_affine(lhs, phi);
     // lambda is short over Z (~128 bits); multiply by it directly.
-    static const uint64_t lam[4] = KZGPU_GLV_LAMBDA_INT;
+    static const uint64_t lam[4] = MP_GLV_LAMBDA_INT;
     G1 acc = kG1Identity;
     bool started = false;
     for (int i = 3; i >= 0; i--) {
@@ -689,7 +689,7 @@ bool g1_decompress(G1Affine &out, const uint8_t in[48]) {
     fp_from_u64(four, 4);
     fp_add(y2, y2, four);
     // p == 3 (mod 4), so sqrt(a) == a^((p+1)/4).
-    static const uint64_t e[6] = KZGPU_FP_P_MINUS_3_DIV_4;
+    static const uint64_t e[6] = MP_FP_P_MINUS_3_DIV_4;
     Fp y;
     fp_pow_limbs(y, y2, e, 6);
     fp_mul(y, y, y2); // a^((p-3)/4) * a == a^((p+1)/4)
@@ -722,4 +722,4 @@ uint32_t bit_reverse(uint32_t x, uint32_t bits) {
     return r;
 }
 
-} // namespace kzgpu
+} // namespace mp

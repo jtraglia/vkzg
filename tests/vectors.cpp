@@ -4,7 +4,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
-namespace kzgpu_test {
+namespace mp_test {
 
 std::vector<Vector> load_all(const std::string &dir) {
     std::vector<std::string> names;
@@ -27,4 +27,4 @@ std::vector<Vector> load_all(const std::string &dir) {
     return out;
 }
 
-} // namespace kzgpu_test
+} // namespace mp_test

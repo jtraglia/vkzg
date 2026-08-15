@@ -5,17 +5,17 @@
 // gives the shader tests a stage-by-stage oracle to diff against.
 #pragma once
 
-#include "../kzgpu_internal.h"
+#include "../internal.h"
 #include "bls12_381.h"
 #include "setup.h"
 
 #include <vector>
 
-namespace kzgpu {
+namespace mp {
 
 
 // Full pipeline. `cells` and `proofs` may be null.
-kzgpu_result reference_compute(const SetupTables &tables, const uint8_t *blob, uint8_t *cells,
+mp_result reference_compute(const SetupTables &tables, const uint8_t *blob, uint8_t *cells,
                                uint8_t *proofs);
 void phase_b_circulant(G1 *out, const G1 *u, const SetupTables &tables);
 
@@ -25,4 +25,4 @@ void phase_b_circulant(G1 *out, const G1 *u, const SetupTables &tables);
 void phase_b_via_g1_ffts(G1 *out, const G1 *u, const SetupTables &tables);
 
 
-} // namespace kzgpu
+} // namespace mp

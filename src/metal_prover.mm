@@ -2,12 +2,12 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
-#include "../include/kzgpu.h"
+#include "../include/metal_prover.h"
 #include "cpu/bls12_381.h"
 #include "cpu/setup.h"
-#include "kzgpu_internal.h"
+#include "internal.h"
 #include "setup_data.h"
-#include "kzgpu_profile.h"
+#include "profile.h"
 #include "shaders/shader_source.h"
 
 #include <algorithm>
@@ -19,7 +19,7 @@
 #include <string>
 #include <vector>
 
-using namespace kzgpu;
+using namespace mp;
 
 namespace {
 
@@ -50,7 +50,7 @@ uint32_t ilog2(uint32_t n) {
 
 } // namespace
 
-struct kzgpu_prover {
+struct mp_prover {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
 
@@ -107,27 +107,27 @@ struct kzgpu_prover {
 
 // --------------------------------------------------------------------- utils
 
-const char *kzgpu_error_string(kzgpu_result r) {
+const char *mp_error_string(mp_result r) {
     switch (r) {
-        case KZGPU_OK: return "ok";
-        case KZGPU_ERR_BADARGS: return "invalid argument";
-        case KZGPU_ERR_MALLOC: return "allocation failed";
-        case KZGPU_ERR_IO: return "i/o error";
-        case KZGPU_ERR_SETUP: return "malformed trusted setup";
-        case KZGPU_ERR_GPU: return "gpu error";
-        case KZGPU_ERR_INVALID_BLOB: return "blob contains a non-canonical field element";
+        case MP_OK: return "ok";
+        case MP_ERR_BADARGS: return "invalid argument";
+        case MP_ERR_MALLOC: return "allocation failed";
+        case MP_ERR_IO: return "i/o error";
+        case MP_ERR_SETUP: return "malformed trusted setup";
+        case MP_ERR_GPU: return "gpu error";
+        case MP_ERR_INVALID_BLOB: return "blob contains a non-canonical field element";
     }
     return "unknown error";
 }
 
-void kzgpu_options_default(kzgpu_options *opts) {
+void mp_options_default(mp_options *opts) {
     if (!opts) return;
     opts->table_cache_path = nullptr;
     opts->validate_setup = 0;
     opts->max_batch_size = 0;
 }
 
-const char *kzgpu_device_name(const kzgpu_prover *p) {
+const char *mp_prover_device_name(const mp_prover *p) {
     return p ? p->deviceName.c_str() : "";
 }
 
@@ -145,9 +145,9 @@ id<MTLBuffer> makeBufferFrom(id<MTLDevice> dev, const void *src, size_t bytes) {
     return b;
 }
 
-bool allocateWorkingSet(kzgpu_prover *p, uint32_t batch) {
+bool allocateWorkingSet(mp_prover *p, uint32_t batch) {
     const size_t B = batch;
-    p->bufBlob = makeBuffer(p->device, B * KZGPU_BYTES_PER_BLOB);
+    p->bufBlob = makeBuffer(p->device, B * MP_BYTES_PER_BLOB);
     p->bufLagrange = makeBuffer(p->device, B * kFieldElementsPerBlob * kFrLimbs * 4);
     p->bufWorkA = makeBuffer(p->device, B * kFieldElementsPerExtBlob * kFrLimbs * 4);
     p->bufPolyExt = makeBuffer(p->device, B * kFieldElementsPerExtBlob * kFrLimbs * 4);
@@ -186,18 +186,18 @@ bool allocateWorkingSet(kzgpu_prover *p, uint32_t batch) {
     return true;
 }
 
-kzgpu_result buildPipelines(kzgpu_prover *p) {
+mp_result buildPipelines(mp_prover *p) {
     NSError *err = nil;
     MTLCompileOptions *opts = [MTLCompileOptions new];
     // Integer-only code, but be explicit that we want exact semantics.
     if (@available(macOS 15.0, *)) {
         opts.mathMode = MTLMathModeSafe;
     }
-    NSString *src = [NSString stringWithUTF8String:kzgpu::kShaderSource];
+    NSString *src = [NSString stringWithUTF8String:mp::kShaderSource];
     id<MTLLibrary> lib = [p->device newLibraryWithSource:src options:opts error:&err];
     if (!lib) {
-        NSLog(@"kzgpu: shader compilation failed: %@", err.localizedDescription);
-        return KZGPU_ERR_GPU;
+        NSLog(@"metal-prover: shader compilation failed: %@", err.localizedDescription);
+        return MP_ERR_GPU;
     }
 
     struct {
@@ -219,32 +219,32 @@ kzgpu_result buildPipelines(kzgpu_prover *p) {
     for (auto &k : kernels) {
         id<MTLFunction> fn = [lib newFunctionWithName:[NSString stringWithUTF8String:k.name]];
         if (!fn) {
-            NSLog(@"kzgpu: missing kernel %s", k.name);
-            return KZGPU_ERR_GPU;
+            NSLog(@"metal-prover: missing kernel %s", k.name);
+            return MP_ERR_GPU;
         }
         id<MTLComputePipelineState> pso = [p->device newComputePipelineStateWithFunction:fn
                                                                                   error:&err];
         if (!pso) {
-            NSLog(@"kzgpu: pipeline for %s failed: %@", k.name, err.localizedDescription);
-            return KZGPU_ERR_GPU;
+            NSLog(@"metal-prover: pipeline for %s failed: %@", k.name, err.localizedDescription);
+            return MP_ERR_GPU;
         }
         *k.slot = pso;
     }
-    return KZGPU_OK;
+    return MP_OK;
 }
 
-kzgpu_result createProver(kzgpu_prover **out, SetupTables &tables, const kzgpu_options *opts) {
-    auto *p = new kzgpu_prover();
+mp_result createProver(mp_prover **out, SetupTables &tables, const mp_options *opts) {
+    auto *p = new mp_prover();
     p->device = MTLCreateSystemDefaultDevice();
     if (!p->device) {
         delete p;
-        return KZGPU_ERR_GPU;
+        return MP_ERR_GPU;
     }
     p->queue = [p->device newCommandQueue];
     p->deviceName = [[p->device name] UTF8String];
 
-    kzgpu_result rc = buildPipelines(p);
-    if (rc != KZGPU_OK) {
+    mp_result rc = buildPipelines(p);
+    if (rc != MP_OK) {
         delete p;
         return rc;
     }
@@ -264,19 +264,19 @@ kzgpu_result createProver(kzgpu_prover **out, SetupTables &tables, const kzgpu_o
     uint32_t batch = opts && opts->max_batch_size ? opts->max_batch_size : 4;
     if (!allocateWorkingSet(p, batch)) {
         delete p;
-        return KZGPU_ERR_MALLOC;
+        return MP_ERR_MALLOC;
     }
     *out = p;
-    return KZGPU_OK;
+    return MP_OK;
 }
 
 } // namespace
 
 // --------------------------------------------------------------- constructors
 
-kzgpu_result kzgpu_prover_new(kzgpu_prover **out, const uint8_t *g1_monomial_bytes,
-                              size_t g1_monomial_len, const kzgpu_options *opts) {
-    if (!out || !g1_monomial_bytes) return KZGPU_ERR_BADARGS;
+mp_result mp_prover_new(mp_prover **out, const uint8_t *g1_monomial_bytes,
+                              size_t g1_monomial_len, const mp_options *opts) {
+    if (!out || !g1_monomial_bytes) return MP_ERR_BADARGS;
     *out = nullptr;
 
     SetupTables tables;
@@ -288,11 +288,11 @@ kzgpu_result kzgpu_prover_new(kzgpu_prover **out, const uint8_t *g1_monomial_byt
     bool have = false;
     if (cache) {
         const uint64_t digest = compute_setup_digest(g1_monomial_bytes, g1_monomial_len);
-        have = load_table_cache(cache, digest, tables) == KZGPU_OK;
+        have = load_table_cache(cache, digest, tables) == MP_OK;
     }
     if (!have) {
-        kzgpu_result rc = build_setup_tables(g1_monomial_bytes, g1_monomial_len, validate, tables);
-        if (rc != KZGPU_OK) return rc;
+        mp_result rc = build_setup_tables(g1_monomial_bytes, g1_monomial_len, validate, tables);
+        if (rc != MP_OK) return rc;
         if (cache) save_table_cache(cache, tables);
     }
 
@@ -301,18 +301,18 @@ kzgpu_result kzgpu_prover_new(kzgpu_prover **out, const uint8_t *g1_monomial_byt
     }
 }
 
-kzgpu_result kzgpu_prover_new_default(kzgpu_prover **out, const kzgpu_options *opts) {
-    return kzgpu_prover_new(out, kEmbeddedSetupG1Monomial, kEmbeddedSetupSize, opts);
+mp_result mp_prover_new_default(mp_prover **out, const mp_options *opts) {
+    return mp_prover_new(out, kEmbeddedSetupG1Monomial, kEmbeddedSetupSize, opts);
 }
 
 
-void kzgpu_prover_free(kzgpu_prover *p) { delete p; }
+void mp_prover_free(mp_prover *p) { delete p; }
 
 // -------------------------------------------------------------------- compute
 
 namespace {
 
-void encodeNtt(id<MTLComputeCommandEncoder> enc, kzgpu_prover *p, id<MTLBuffer> out,
+void encodeNtt(id<MTLComputeCommandEncoder> enc, mp_prover *p, id<MTLBuffer> out,
                id<MTLBuffer> in, id<MTLBuffer> roots, const NttParams &params, uint32_t count,
                uint32_t batch) {
     [enc setComputePipelineState:p->psoNtt];
@@ -380,7 +380,7 @@ uint32_t inversionChunk(uint32_t count, uint32_t floorChunk, uint32_t ceilChunk,
     return chunk;
 }
 
-void encodeReduce(id<MTLComputeCommandEncoder> enc, kzgpu_prover *p, id<MTLBuffer> out,
+void encodeReduce(id<MTLComputeCommandEncoder> enc, mp_prover *p, id<MTLBuffer> out,
                   uint32_t count, uint32_t batch) {
     [enc setComputePipelineState:p->psoReduce];
     [enc setBuffer:out offset:0 atIndex:0];
@@ -397,7 +397,7 @@ struct NormalizeParams {
     uint32_t chunk;
 };
 
-void encodeNormalize(id<MTLComputeCommandEncoder> enc, kzgpu_prover *p, id<MTLBuffer> outAffine,
+void encodeNormalize(id<MTLComputeCommandEncoder> enc, mp_prover *p, id<MTLBuffer> outAffine,
                      id<MTLBuffer> inJacobian, uint32_t count, uint32_t chunk) {
     NormalizeParams np{count, chunk};
     const uint32_t threads = (count + chunk - 1) / chunk;
@@ -413,13 +413,13 @@ void encodeNormalize(id<MTLComputeCommandEncoder> enc, kzgpu_prover *p, id<MTLBu
 // `stageSplit` is for the profiler only: it flushes the command buffer at each
 // stage boundary so the stages can be timed individually.  Normal calls encode
 // everything into one command buffer.
-kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, const uint8_t *blobs,
+mp_result computeBatch(mp_prover *p, uint8_t *cells, uint8_t *proofs, const uint8_t *blobs,
                           uint32_t batch, bool stageSplit = false) {
     @autoreleasepool {
         StageTimes &st = p->lastStage;
         st = StageTimes{};
         const double tStart = nowMs();
-        memcpy(p->bufBlob.contents, blobs, (size_t)batch * KZGPU_BYTES_PER_BLOB);
+        memcpy(p->bufBlob.contents, blobs, (size_t)batch * MP_BYTES_PER_BLOB);
         *(uint32_t *)p->bufErr.contents = 0;
 
         // The whole pipeline is one command buffer: nothing needs the host in
@@ -553,10 +553,10 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
         [cb commit];
         [cb waitUntilCompleted];
         if (cb.error || failed) {
-            NSLog(@"kzgpu: command buffer failed: %@", cb.error);
-            return KZGPU_ERR_GPU;
+            NSLog(@"metal-prover: command buffer failed: %@", cb.error);
+            return MP_ERR_GPU;
         }
-        if (*(uint32_t *)p->bufErr.contents != 0) return KZGPU_ERR_INVALID_BLOB;
+        if (*(uint32_t *)p->bufErr.contents != 0) return MP_ERR_INVALID_BLOB;
 
         if (cells) {
             memcpy(cells, p->bufCells.contents, (size_t)batch * kFieldElementsPerExtBlob * 32);
@@ -566,36 +566,36 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
                    (size_t)batch * kCirculantSize * kBytesPerProof);
         }
         st.total = nowMs() - tStart;
-        return KZGPU_OK;
+        return MP_OK;
     }
 }
 
 } // namespace
 
-kzgpu_result kzgpu_compute_cells_and_proofs(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs,
+mp_result mp_compute_cells_and_proofs(mp_prover *p, uint8_t *cells, uint8_t *proofs,
                                             const uint8_t *blob) {
-    return kzgpu_compute_cells_and_proofs_batch(p, cells, proofs, blob, 1);
+    return mp_compute_cells_and_proofs_batch(p, cells, proofs, blob, 1);
 }
 
-kzgpu_result kzgpu_compute_cells_and_proofs_batch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs,
+mp_result mp_compute_cells_and_proofs_batch(mp_prover *p, uint8_t *cells, uint8_t *proofs,
                                                   const uint8_t *blobs, size_t num_blobs) {
-    if (!p || !blobs) return KZGPU_ERR_BADARGS;
-    if (!cells && !proofs) return KZGPU_ERR_BADARGS;
-    if (num_blobs == 0) return KZGPU_OK;
+    if (!p || !blobs) return MP_ERR_BADARGS;
+    if (!cells && !proofs) return MP_ERR_BADARGS;
+    if (num_blobs == 0) return MP_OK;
 
     std::lock_guard<std::mutex> lock(p->mutex);
-    const size_t cellBytes = (size_t)kCirculantSize * KZGPU_BYTES_PER_CELL;
+    const size_t cellBytes = (size_t)kCirculantSize * MP_BYTES_PER_CELL;
     const size_t proofBytes = (size_t)kCirculantSize * kBytesPerProof;
 
     for (size_t done = 0; done < num_blobs;) {
         const uint32_t batch = (uint32_t)std::min<size_t>(p->maxBatch, num_blobs - done);
-        kzgpu_result rc = computeBatch(p, cells ? cells + done * cellBytes : nullptr,
+        mp_result rc = computeBatch(p, cells ? cells + done * cellBytes : nullptr,
                                        proofs ? proofs + done * proofBytes : nullptr,
-                                       blobs + done * KZGPU_BYTES_PER_BLOB, batch);
-        if (rc != KZGPU_OK) return rc;
+                                       blobs + done * MP_BYTES_PER_BLOB, batch);
+        if (rc != MP_OK) return rc;
         done += batch;
     }
-    return KZGPU_OK;
+    return MP_OK;
 }
 
 // ------------------------------------------------------------------ profiling
@@ -603,17 +603,17 @@ kzgpu_result kzgpu_compute_cells_and_proofs_batch(kzgpu_prover *p, uint8_t *cell
 // Development helper: computeBatch records what it measured into the prover,
 // and this just runs it and hands the numbers back.  Reporting the real path
 // matters here rather than a separate re-implementation of the dispatch order.
-#include "kzgpu_profile.h"
+#include "profile.h"
 
-namespace kzgpu {
+namespace mp {
 
-kzgpu_result profile_batch(kzgpu_prover *p, unsigned char *cells, unsigned char *proofs,
+mp_result profile_batch(mp_prover *p, unsigned char *cells, unsigned char *proofs,
                            const unsigned char *blobs, unsigned batch, StageTimes &out) {
-    if (!p || !blobs) return KZGPU_ERR_BADARGS;
+    if (!p || !blobs) return MP_ERR_BADARGS;
     std::lock_guard<std::mutex> lock(p->mutex);
-    const kzgpu_result rc = computeBatch(p, cells, proofs, blobs, batch, /*stageSplit=*/true);
+    const mp_result rc = computeBatch(p, cells, proofs, blobs, batch, /*stageSplit=*/true);
     out = p->lastStage;
     return rc;
 }
 
-} // namespace kzgpu
+} // namespace mp

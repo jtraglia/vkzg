@@ -14,7 +14,7 @@
 #include <cstdio>
 #include <cstring>
 
-using namespace kzgpu;
+using namespace mp;
 
 static int g_failures = 0;
 
@@ -82,12 +82,12 @@ int main(int argc, char **argv) {
     SetupTables tables;
     double t0 = now_ms();
     // Reuse a cache so repeated runs during development are quick.
-    const std::string cache = "/tmp/kzgpu_tables_ref.cache";
+    const std::string cache = "/tmp/mp_prover_tables_ref.cache";
     const uint64_t digest = compute_setup_digest(kEmbeddedSetupG1Monomial, kEmbeddedSetupSize);
-    bool loaded = load_table_cache(cache, digest, tables) == KZGPU_OK;
+    bool loaded = load_table_cache(cache, digest, tables) == MP_OK;
     if (!loaded) {
         if (build_setup_tables(kEmbeddedSetupG1Monomial, kEmbeddedSetupSize, true, tables) !=
-            KZGPU_OK) {
+            MP_OK) {
             printf("FAIL: build_setup_tables\n");
             return 1;
         }
@@ -98,7 +98,7 @@ int main(int argc, char **argv) {
 
     test_circulant_equivalence(tables);
 
-    auto vectors = kzgpu_test::load_all(vec_dir);
+    auto vectors = mp_test::load_all(vec_dir);
     if (vectors.empty()) {
         printf("FAIL: no test vectors found in %s\n", vec_dir);
         return 1;
@@ -111,13 +111,13 @@ int main(int argc, char **argv) {
         // The library takes a fixed-size blob buffer, so a wrong length is the
         // caller's error to catch -- two of the spec vectors exercise exactly
         // that, and the harness stands in for the caller here.
-        kzgpu_result rc = v.blob.size() == (size_t)kFieldElementsPerBlob * kBytesPerFieldElement
+        mp_result rc = v.blob.size() == (size_t)kFieldElementsPerBlob * kBytesPerFieldElement
                               ? reference_compute(tables, v.blob.data(), cells.data(), proofs.data())
-                              : KZGPU_ERR_BADARGS;
+                              : MP_ERR_BADARGS;
         double ms = now_ms() - a;
 
         if (!v.valid) {
-            if (rc == KZGPU_OK) {
+            if (rc == MP_OK) {
                 printf("FAIL %s: expected rejection, got success\n", v.name.c_str());
                 g_failures++;
             } else {
@@ -125,7 +125,7 @@ int main(int argc, char **argv) {
             }
             continue;
         }
-        if (rc != KZGPU_OK) {
+        if (rc != MP_OK) {
             printf("FAIL %s: unexpected error %d\n", v.name.c_str(), (int)rc);
             g_failures++;
             continue;
