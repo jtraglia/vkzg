@@ -218,56 +218,57 @@ kernel void k_build_circulant(device uint *coeffs [[buffer(0)]], device const ui
 }
 
 // ------------------------------------------------------------------- phase A
-
-// One threadgroup per output j, one thread per bucket, reduction fused in.
 //
-// The digits are bucket-sorted in threadgroup memory first.  Without that, a
-// SIMD group would step through all 2048 items with at most a couple of lanes
-// doing a point addition at a time; sorting keeps every lane busy and costs a
-// few microseconds of integer work against milliseconds of curve arithmetic.
-// The recoding runs twice -- once to histogram, once to scatter -- because
-// keeping the digits around costs 4KB of threadgroup memory, and threadgroup
-// memory is what caps residency here.
-kernel void k_phase_a(device uint *out [[buffer(0)]], device const uint *coeffs [[buffer(1)]],
-                      device const uint *table [[buffer(2)]],
-                      uint2 tgid [[threadgroup_position_in_grid]],
-                      uint2 tid2 [[thread_position_in_threadgroup]]) {
+// Split into a scalar pass and a curve pass on purpose.  The recoding, the
+// histogram and the bucket sort together are 0.6% of phase A's runtime, but
+// keeping them in the same kernel as the accumulation forces one register
+// allocation and one threadgroup-memory footprint for both, and occupancy is
+// exactly what the accumulation is short of.  Separated, the curve kernel needs
+// no threadgroup memory at all.
+
+// Signed-digit recoding, histogram, load ordering and bucket sort for one
+// output.  64 threads, one per scalar.
+kernel void k_phase_a_sort(device ushort *items [[buffer(0)]], device uint *starts [[buffer(1)]],
+                           device uint *perm [[buffer(2)]], device const uint *coeffs [[buffer(3)]],
+                           uint2 tgid [[threadgroup_position_in_grid]],
+                           uint2 tid2 [[thread_position_in_threadgroup]]) {
     const uint tid = tid2.x;
-    threadgroup ushort tg_sorted[L_PHASE_A_ITEMS];
     threadgroup atomic_uint tg_count[L_NUM_BUCKETS];
     threadgroup uint tg_start[L_NUM_BUCKETS + 1];
-    threadgroup uchar tg_perm[L_NUM_BUCKETS];
     threadgroup uint tg_hist[L_LOAD_CLASSES];
 
     const uint j = tgid.x;
     const uint b = tgid.y;
+    const ulong out_index = (ulong)b * L_CIRCULANT_SIZE + j;
+    device ushort *my_items = items + out_index * L_PHASE_A_ITEMS;
+    device uint *my_starts = starts + out_index * (L_NUM_BUCKETS + 1);
+    device uint *my_perm = perm + out_index * L_NUM_BUCKETS;
 
-    atomic_store_explicit(&tg_count[tid], 0u, memory_order_relaxed);
+    if (tid < L_NUM_BUCKETS / 2u) {
+        atomic_store_explicit(&tg_count[tid], 0u, memory_order_relaxed);
+        atomic_store_explicit(&tg_count[tid + L_NUM_BUCKETS / 2u], 0u, memory_order_relaxed);
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Signed-digit recoding of this thread's scalar.  digit = byte + carry, and
-    // if it exceeds the half window we borrow from the next digit; scalars are
-    // below r < 2^255 so the carry chain always terminates inside 32 digits.
-    Fr scalar;
-    if (tid < L_PHASE_A_TERMS) {
-        scalar = fr_load(coeffs + ((ulong)b * L_CIRCULANT_SIZE * L_PHASE_A_TERMS +
-                                   (ulong)j * L_PHASE_A_TERMS + tid) *
-                                      FR_NLIMBS);
-        scalar = fr_to_canonical(scalar);
-        int carry = 0;
+    // digit = byte + carry, borrowing into the next digit past the half window.
+    // Every scalar is below r < 2^255, so the carry chain always terminates
+    // inside 32 digits and no 33rd digit is ever needed.
+    Fr scalar = fr_load(coeffs + ((ulong)b * L_CIRCULANT_SIZE * L_PHASE_A_TERMS +
+                                  (ulong)j * L_PHASE_A_TERMS + tid) *
+                                     FR_NLIMBS);
+    scalar = fr_to_canonical(scalar);
+    int carry = 0;
 #pragma clang loop unroll(full)
-        for (uint dd = 0u; dd < L_NUM_DIGITS; dd++) {
-            const uint byte = (scalar.v[dd >> 2] >> ((dd & 3u) * 8u)) & 0xffu;
-            int v = (int)byte + carry;
-            carry = 0;
-            if (v > L_NUM_BUCKETS) {
-                v -= 2 * L_NUM_BUCKETS;
-                carry = 1;
-            }
-            if (v != 0) {
-                const uint bucket = (uint)(v < 0 ? -v : v) - 1u;
-                atomic_fetch_add_explicit(&tg_count[bucket], 1u, memory_order_relaxed);
-            }
+    for (uint dd = 0u; dd < L_NUM_DIGITS; dd++) {
+        const uint byte = (scalar.v[dd >> 2] >> ((dd & 3u) * 8u)) & 0xffu;
+        int v = (int)byte + carry;
+        carry = 0;
+        if (v > L_NUM_BUCKETS) {
+            v -= 2 * L_NUM_BUCKETS;
+            carry = 1;
+        }
+        if (v != 0) {
+            atomic_fetch_add_explicit(&tg_count[(uint)abs(v) - 1u], 1u, memory_order_relaxed);
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -282,19 +283,15 @@ kernel void k_phase_a(device uint *out [[buffer(0)]], device const uint *coeffs 
         tg_start[L_NUM_BUCKETS] = acc;
 
         // Order the buckets by descending load before handing them to lanes.
-        //
-        // A SIMD group runs until its slowest lane is done, so with a random
-        // assignment all four groups pay the global maximum (measured 24.8
-        // against a mean of 15.9).  Sorting first means only the first group
-        // sees the heavy tail and the rest finish near their own means, which
-        // is worth about 1.3x on the accumulation for a 200-iteration integer
-        // sort.  Counting sort on the load, clamped into L_LOAD_CLASSES bins.
+        // A SIMD group runs until its slowest lane finishes, and loads are
+        // Poisson(16): the max within a 32-lane group measures 24.8 against a
+        // mean of 15.9, so a random assignment makes all four groups pay the
+        // tail.  Counting sort into L_LOAD_CLASSES bins, heaviest first.
         for (uint c = 0u; c < L_LOAD_CLASSES; c++) tg_hist[c] = 0u;
         for (uint k = 0u; k < L_NUM_BUCKETS; k++) {
-            uint n = tg_start[k + 1u] - tg_start[k];
-            tg_hist[min(n, (uint)L_LOAD_CLASSES - 1u)]++;
+            tg_hist[min(tg_start[k + 1u] - tg_start[k], (uint)L_LOAD_CLASSES - 1u)]++;
         }
-        uint pos = 0u; // walk classes from heaviest to lightest
+        uint pos = 0u;
         for (uint c = L_LOAD_CLASSES; c-- > 0u;) {
             const uint n = tg_hist[c];
             tg_hist[c] = pos;
@@ -302,53 +299,60 @@ kernel void k_phase_a(device uint *out [[buffer(0)]], device const uint *coeffs 
             if (c == 0u) break;
         }
         for (uint k = 0u; k < L_NUM_BUCKETS; k++) {
-            uint n = tg_start[k + 1u] - tg_start[k];
-            tg_perm[tg_hist[min(n, (uint)L_LOAD_CLASSES - 1u)]++] = (uchar)k;
+            const uint cls = min(tg_start[k + 1u] - tg_start[k], (uint)L_LOAD_CLASSES - 1u);
+            my_perm[tg_hist[cls]++] = k;
         }
+        for (uint k = 0u; k <= L_NUM_BUCKETS; k++) my_starts[k] = tg_start[k];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Scatter into bucket order; tg_count is now a per-bucket write cursor.
-    if (tid < L_PHASE_A_TERMS) {
-        int carry = 0;
+    carry = 0;
 #pragma clang loop unroll(full)
-        for (uint dd = 0u; dd < L_NUM_DIGITS; dd++) {
-            const uint byte = (scalar.v[dd >> 2] >> ((dd & 3u) * 8u)) & 0xffu;
-            int v = (int)byte + carry;
-            carry = 0;
-            if (v > L_NUM_BUCKETS) {
-                v -= 2 * L_NUM_BUCKETS;
-                carry = 1;
-            }
-            if (v != 0) {
-                const uint neg = v < 0 ? 1u : 0u;
-                const uint bucket = (uint)(v < 0 ? -v : v) - 1u;
-                const uint slot =
-                    atomic_fetch_add_explicit(&tg_count[bucket], 1u, memory_order_relaxed);
-                tg_sorted[slot] = (ushort)((tid << 6) | (dd << 1) | neg);
-            }
+    for (uint dd = 0u; dd < L_NUM_DIGITS; dd++) {
+        const uint byte = (scalar.v[dd >> 2] >> ((dd & 3u) * 8u)) & 0xffu;
+        int v = (int)byte + carry;
+        carry = 0;
+        if (v > L_NUM_BUCKETS) {
+            v -= 2 * L_NUM_BUCKETS;
+            carry = 1;
+        }
+        if (v != 0) {
+            const uint neg = v < 0 ? 1u : 0u;
+            const uint slot = atomic_fetch_add_explicit(&tg_count[(uint)abs(v) - 1u], 1u,
+                                                        memory_order_relaxed);
+            my_items[slot] = (ushort)((tid << 6) | (dd << 1) | neg);
         }
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
 
+// Bucket accumulation: one thread per bucket, no threadgroup memory.
+kernel void k_phase_a(device uint *buckets [[buffer(0)]], device const ushort *items [[buffer(1)]],
+                      device const uint *starts [[buffer(2)]], device const uint *perm [[buffer(3)]],
+                      device const uint *table [[buffer(4)]],
+                      uint2 tgid [[threadgroup_position_in_grid]],
+                      uint2 tid2 [[thread_position_in_threadgroup]]) {
+    const uint tid = tid2.x;
+    const uint j = tgid.x;
+    const uint b = tgid.y;
+    const ulong out_index = (ulong)b * L_CIRCULANT_SIZE + j;
+
+    const uint bucket = perm[out_index * L_NUM_BUCKETS + tid];
+    device const uint *my_starts = starts + out_index * (L_NUM_BUCKETS + 1);
+    device const ushort *my_items = items + out_index * L_PHASE_A_ITEMS;
+    const uint lo = my_starts[bucket];
+    const uint hi = my_starts[bucket + 1u];
+
+    device const uint *tbase = table + (ulong)j * L_PHASE_A_TERMS * L_NUM_DIGITS * L_AFFINE_WORDS;
     G1 acc = g1_identity();
-    const uint bucket = (uint)tg_perm[tid];
-    {
-        const uint lo = tg_start[bucket];
-        const uint hi = tg_start[bucket + 1u];
-        device const uint *tbase =
-            table + (ulong)j * L_PHASE_A_TERMS * L_NUM_DIGITS * L_AFFINE_WORDS;
-        for (uint it = lo; it < hi; it++) {
-            const uint packed = tg_sorted[it];
-            const uint i = packed >> 6;
-            const uint dd = (packed >> 1) & 31u;
-            G1A pt = g1a_load(tbase + (ulong)(i * L_NUM_DIGITS + dd) * L_AFFINE_WORDS);
-            if ((packed & 1u) != 0u) pt.y = fp_neg(pt.y);
-            acc = g1_madd(acc, pt);
-        }
+    for (uint it = lo; it < hi; it++) {
+        const uint packed = my_items[it];
+        G1A pt = g1a_load(tbase + (ulong)((packed >> 6) * L_NUM_DIGITS + ((packed >> 1) & 31u)) *
+                                      L_AFFINE_WORDS);
+        if ((packed & 1u) != 0u) pt.y = fp_neg(pt.y);
+        acc = g1_madd(acc, pt);
     }
-
-    g1_store(out +
+    g1_store(buckets +
                  ((ulong)b * L_CIRCULANT_SIZE * L_NUM_BUCKETS + (ulong)j * L_NUM_BUCKETS + bucket) *
                      L_JACOBIAN_WORDS,
              acc);

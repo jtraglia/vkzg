@@ -53,6 +53,7 @@ struct kzgpu_prover {
     id<MTLComputePipelineState> psoNtt = nil;
     id<MTLComputePipelineState> psoSerializeCells = nil;
     id<MTLComputePipelineState> psoBuildCirculant = nil;
+    id<MTLComputePipelineState> psoPhaseASort = nil;
     id<MTLComputePipelineState> psoPhaseA = nil;
     id<MTLComputePipelineState> psoPhaseB = nil;
     id<MTLComputePipelineState> psoReduce = nil;
@@ -74,6 +75,9 @@ struct kzgpu_prover {
     id<MTLBuffer> bufCells = nil;
     id<MTLBuffer> bufCoeffs = nil;
     id<MTLBuffer> bufBuckets = nil;
+    id<MTLBuffer> bufItems = nil;  // bucket-sorted phase A digit lists
+    id<MTLBuffer> bufStarts = nil;
+    id<MTLBuffer> bufPerm = nil;   // per-output lane -> bucket ordering
     id<MTLBuffer> bufPoints = nil;     // u[j], then reused for the proofs
     id<MTLBuffer> bufProofs = nil;
     id<MTLBuffer> bufLadderAff = nil;
@@ -137,6 +141,9 @@ bool allocateWorkingSet(kzgpu_prover *p, uint32_t batch) {
     p->bufCells = makeBuffer(p->device, B * kFieldElementsPerExtBlob * 32);
     p->bufCoeffs = makeBuffer(p->device, B * kCirculantSize * kPhaseATerms * kFrLimbs * 4);
     p->bufBuckets = makeBuffer(p->device, B * kCirculantSize * kNumBuckets * kJacobianWords * 4);
+    p->bufItems = makeBuffer(p->device, B * kCirculantSize * kPhaseAItems * 2);
+    p->bufStarts = makeBuffer(p->device, B * kCirculantSize * (kNumBuckets + 1) * 4);
+    p->bufPerm = makeBuffer(p->device, B * kCirculantSize * kNumBuckets * 4);
     p->bufPoints = makeBuffer(p->device, B * kCirculantSize * kJacobianWords * 4);
     p->bufProofs = makeBuffer(p->device, B * kCirculantSize * kJacobianWords * 4);
     p->bufLadderAff =
@@ -144,7 +151,8 @@ bool allocateWorkingSet(kzgpu_prover *p, uint32_t batch) {
     p->bufErr = makeBuffer(p->device, 4);
 
     if (!p->bufBlob || !p->bufLagrange || !p->bufWorkA || !p->bufPolyExt || !p->bufEvals ||
-        !p->bufCells || !p->bufCoeffs || !p->bufBuckets || !p->bufPoints || !p->bufProofs ||
+        !p->bufCells || !p->bufCoeffs || !p->bufBuckets || !p->bufItems || !p->bufStarts || !p->bufPerm ||
+        !p->bufPoints || !p->bufProofs ||
         !p->bufLadderAff || !p->bufErr) {
         return false;
     }
@@ -177,6 +185,7 @@ kzgpu_result buildPipelines(kzgpu_prover *p) {
         {"k_ntt_pass", &p->psoNtt},
         {"k_serialize_cells", &p->psoSerializeCells},
         {"k_build_circulant", &p->psoBuildCirculant},
+        {"k_phase_a_sort", &p->psoPhaseASort},
         {"k_phase_a", &p->psoPhaseA},
         {"k_phase_b", &p->psoPhaseB},
         {"k_bucket_reduce", &p->psoReduce},
@@ -381,11 +390,22 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
             [enc dispatchThreadgroups:MTLSizeMake(kPhaseATerms, batch, 1)
                 threadsPerThreadgroup:MTLSizeMake(kCirculantSize, 1, 1)];
 
-            // 5. phase A: fixed-base bucket MSM, reduction fused in
+            // 5a. phase A scalar pass: recode, histogram, load-order, sort
+            [enc setComputePipelineState:p->psoPhaseASort];
+            [enc setBuffer:p->bufItems offset:0 atIndex:0];
+            [enc setBuffer:p->bufStarts offset:0 atIndex:1];
+            [enc setBuffer:p->bufPerm offset:0 atIndex:2];
+            [enc setBuffer:p->bufCoeffs offset:0 atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake(kCirculantSize, batch, 1)
+                threadsPerThreadgroup:MTLSizeMake(kPhaseATerms, 1, 1)];
+
+            // 5b. phase A curve pass: fixed-base bucket MSM
             [enc setComputePipelineState:p->psoPhaseA];
             [enc setBuffer:p->bufBuckets offset:0 atIndex:0];
-            [enc setBuffer:p->bufCoeffs offset:0 atIndex:1];
-            [enc setBuffer:p->bufTable offset:0 atIndex:2];
+            [enc setBuffer:p->bufItems offset:0 atIndex:1];
+            [enc setBuffer:p->bufStarts offset:0 atIndex:2];
+            [enc setBuffer:p->bufPerm offset:0 atIndex:3];
+            [enc setBuffer:p->bufTable offset:0 atIndex:4];
             [enc dispatchThreadgroups:MTLSizeMake(kCirculantSize, batch, 1)
                 threadsPerThreadgroup:MTLSizeMake(kNumBuckets, 1, 1)];
 
@@ -400,7 +420,10 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
         [enc endEncoding];
         [cb commit];
         [cb waitUntilCompleted];
-        if (cb.error) return KZGPU_ERR_GPU;
+        if (cb.error) {
+            NSLog(@"kzgpu: command buffer 1 failed: %@", cb.error);
+            return KZGPU_ERR_GPU;
+        }
 
         if (*(uint32_t *)p->bufErr.contents != 0) return KZGPU_ERR_INVALID_BLOB;
 
@@ -439,7 +462,10 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
         [enc2 endEncoding];
         [cb2 commit];
         [cb2 waitUntilCompleted];
-        if (cb2.error) return KZGPU_ERR_GPU;
+        if (cb2.error) {
+            NSLog(@"kzgpu: command buffer 2 failed: %@", cb2.error);
+            return KZGPU_ERR_GPU;
+        }
 
         finalize_proofs(proofs, (const uint32_t *)p->bufProofs.contents, batch, 0);
         return KZGPU_OK;
@@ -554,11 +580,22 @@ kzgpu_result profile_batch(kzgpu_prover *p, unsigned char *cells, unsigned char 
                 [enc dispatchThreadgroups:MTLSizeMake(kPhaseATerms, batch, 1)
                     threadsPerThreadgroup:MTLSizeMake(kCirculantSize, 1, 1)];
             });
+            out.build_circulant += timedPass(p, [&](id<MTLComputeCommandEncoder> enc) {
+                [enc setComputePipelineState:p->psoPhaseASort];
+                [enc setBuffer:p->bufItems offset:0 atIndex:0];
+                [enc setBuffer:p->bufStarts offset:0 atIndex:1];
+                [enc setBuffer:p->bufPerm offset:0 atIndex:2];
+                [enc setBuffer:p->bufCoeffs offset:0 atIndex:3];
+                [enc dispatchThreadgroups:MTLSizeMake(kCirculantSize, batch, 1)
+                    threadsPerThreadgroup:MTLSizeMake(kPhaseATerms, 1, 1)];
+            });
             out.phase_a = timedPass(p, [&](id<MTLComputeCommandEncoder> enc) {
                 [enc setComputePipelineState:p->psoPhaseA];
                 [enc setBuffer:p->bufBuckets offset:0 atIndex:0];
-                [enc setBuffer:p->bufCoeffs offset:0 atIndex:1];
-                [enc setBuffer:p->bufTable offset:0 atIndex:2];
+                [enc setBuffer:p->bufItems offset:0 atIndex:1];
+                [enc setBuffer:p->bufStarts offset:0 atIndex:2];
+                [enc setBuffer:p->bufPerm offset:0 atIndex:3];
+                [enc setBuffer:p->bufTable offset:0 atIndex:4];
                 [enc dispatchThreadgroups:MTLSizeMake(kCirculantSize, batch, 1)
                     threadsPerThreadgroup:MTLSizeMake(kNumBuckets, 1, 1)];
             });
