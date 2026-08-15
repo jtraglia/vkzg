@@ -2,7 +2,9 @@
 #include "../include/kzgpu.h"
 #include "vectors.h"
 
+#include <atomic>
 #include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -127,6 +129,113 @@ int main(int argc, char **argv) {
                 printf("ok  : batched path, %zu blobs\n", n);
                 passed++;
             }
+        }
+    }
+
+    // ---------------------------------------------------------- API contract
+    {
+        const kzgpu_test::Vector *v = nullptr;
+        for (const auto &x : vectors) {
+            if (x.valid && x.blob.size() == KZGPU_BYTES_PER_BLOB) v = &x;
+        }
+        std::vector<uint8_t> cells(cellBytes), proofs(proofBytes);
+
+        // cells-only and proofs-only must match the combined call.
+        if (kzgpu_compute_cells_and_proofs(p, cells.data(), nullptr, v->blob.data()) != KZGPU_OK ||
+            memcmp(cells.data(), v->cells.data(), cellBytes) != 0) {
+            printf("FAIL: cells-only path\n");
+            g_failures++;
+        } else {
+            passed++;
+        }
+        if (kzgpu_compute_cells_and_proofs(p, nullptr, proofs.data(), v->blob.data()) != KZGPU_OK ||
+            memcmp(proofs.data(), v->proofs.data(), proofBytes) != 0) {
+            printf("FAIL: proofs-only path\n");
+            g_failures++;
+        } else {
+            passed++;
+        }
+
+        // Argument validation.
+        struct {
+            const char *what;
+            kzgpu_result got;
+        } checks[] = {
+            {"null prover", kzgpu_compute_cells_and_proofs(nullptr, cells.data(), proofs.data(),
+                                                           v->blob.data())},
+            {"null blob", kzgpu_compute_cells_and_proofs(p, cells.data(), proofs.data(), nullptr)},
+            {"no outputs requested",
+             kzgpu_compute_cells_and_proofs(p, nullptr, nullptr, v->blob.data())},
+        };
+        for (const auto &c : checks) {
+            if (c.got != KZGPU_ERR_BADARGS) {
+                printf("FAIL: %s should be rejected, got %s\n", c.what, kzgpu_error_string(c.got));
+                g_failures++;
+            } else {
+                passed++;
+            }
+        }
+        // Zero blobs is a no-op, not an error.
+        if (kzgpu_compute_cells_and_proofs_batch(p, cells.data(), proofs.data(), v->blob.data(),
+                                                 0) != KZGPU_OK) {
+            printf("FAIL: zero-length batch should succeed\n");
+            g_failures++;
+        } else {
+            passed++;
+        }
+
+        // A batch larger than max_batch_size must chunk transparently.
+        const size_t big = 9; // max_batch_size is 4 above
+        std::vector<uint8_t> blobs(big * KZGPU_BYTES_PER_BLOB), bc(big * cellBytes),
+            bp(big * proofBytes);
+        for (size_t i = 0; i < big; i++) {
+            memcpy(&blobs[i * KZGPU_BYTES_PER_BLOB], v->blob.data(), KZGPU_BYTES_PER_BLOB);
+        }
+        bool ok = kzgpu_compute_cells_and_proofs_batch(p, bc.data(), bp.data(), blobs.data(),
+                                                       big) == KZGPU_OK;
+        for (size_t i = 0; ok && i < big; i++) {
+            ok &= memcmp(&bc[i * cellBytes], v->cells.data(), cellBytes) == 0;
+            ok &= memcmp(&bp[i * proofBytes], v->proofs.data(), proofBytes) == 0;
+        }
+        if (!ok) {
+            printf("FAIL: batch of %zu (> max_batch_size) did not chunk correctly\n", big);
+            g_failures++;
+        } else {
+            printf("ok  : chunked batch of %zu\n", big);
+            passed++;
+        }
+    }
+
+    // ------------------------------------------------------------ concurrency
+    // The header promises a prover may be shared between threads.
+    {
+        std::vector<const kzgpu_test::Vector *> valid;
+        for (const auto &x : vectors) {
+            if (x.valid && x.blob.size() == KZGPU_BYTES_PER_BLOB) valid.push_back(&x);
+        }
+        std::atomic<int> bad{0};
+        std::vector<std::thread> threads;
+        for (int t = 0; t < 4; t++) {
+            threads.emplace_back([&, t] {
+                std::vector<uint8_t> cells(cellBytes), proofs(proofBytes);
+                for (int r = 0; r < 3; r++) {
+                    const auto *v = valid[(size_t)(t + r) % valid.size()];
+                    if (kzgpu_compute_cells_and_proofs(p, cells.data(), proofs.data(),
+                                                       v->blob.data()) != KZGPU_OK ||
+                        memcmp(proofs.data(), v->proofs.data(), proofBytes) != 0 ||
+                        memcmp(cells.data(), v->cells.data(), cellBytes) != 0) {
+                        bad++;
+                    }
+                }
+            });
+        }
+        for (auto &th : threads) th.join();
+        if (bad) {
+            printf("FAIL: %d concurrent calls returned wrong results\n", bad.load());
+            g_failures++;
+        } else {
+            printf("ok  : 4 threads x 3 calls concurrently\n");
+            passed++;
         }
     }
 
