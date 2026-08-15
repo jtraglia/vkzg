@@ -6,6 +6,7 @@
 #include "cpu/bls12_381.h"
 #include "cpu/setup.h"
 #include "kzgpu_internal.h"
+#include "setup_data.h"
 #include "kzgpu_profile.h"
 #include "shaders/shader_source.h"
 
@@ -300,6 +301,10 @@ kzgpu_result kzgpu_prover_new(kzgpu_prover **out, const uint8_t *g1_monomial_byt
     @autoreleasepool {
         return createProver(out, tables, opts);
     }
+}
+
+kzgpu_result kzgpu_prover_new_default(kzgpu_prover **out, const kzgpu_options *opts) {
+    return kzgpu_prover_new(out, kEmbeddedSetupG1Monomial, kEmbeddedSetupSize, opts);
 }
 
 kzgpu_result kzgpu_prover_new_from_file(kzgpu_prover **out, const char *trusted_setup_path,

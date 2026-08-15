@@ -89,7 +89,16 @@ void kzgpu_options_default(kzgpu_options *opts);
 typedef struct kzgpu_prover kzgpu_prover;
 
 /*
- * Build a prover from the monomial-form G1 trusted setup.
+ * Build a prover using the Ethereum mainnet trusted setup, which is compiled
+ * into the library.  This is what production callers want: the ceremony values
+ * are fixed for the lifetime of the protocol, so there is no file to ship,
+ * locate or validate at runtime.
+ */
+kzgpu_result kzgpu_prover_new_default(kzgpu_prover **out, const kzgpu_options *opts);
+
+/*
+ * Build a prover from a caller-supplied monomial-form G1 trusted setup, for
+ * testnets or a future ceremony.
  *
  * `g1_monomial_bytes` is KZGPU_NUM_SETUP_G1_POINTS compressed points
  * (48 bytes each), in the same order and encoding c-kzg-4844 uses.
@@ -98,7 +107,7 @@ kzgpu_result kzgpu_prover_new(kzgpu_prover **out, const uint8_t *g1_monomial_byt
                               size_t g1_monomial_len, const kzgpu_options *opts);
 
 /*
- * Convenience loader for the standard `trusted_setup.txt` format:
+ * Loader for the standard `trusted_setup.txt` format, for the same reason:
  *     <n1> <n2> <n1 lagrange g1> <n2 g2> <n1 monomial g1>
  * Only the monomial G1 section is used; the rest is parsed and discarded.
  */

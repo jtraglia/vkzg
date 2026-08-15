@@ -239,6 +239,41 @@ int main(int argc, char **argv) {
         }
     }
 
+    // ------------------------------------------------------- embedded setup
+    // The default constructor uses the compiled-in mainnet setup; it must
+    // produce exactly what the file-loaded prover does.
+    {
+        kzgpu_options dopts;
+        kzgpu_options_default(&dopts);
+        dopts.table_cache_path = "/tmp/kzgpu_tables_default.cache";
+        kzgpu_prover *dp = nullptr;
+        kzgpu_result r = kzgpu_prover_new_default(&dp, &dopts);
+        if (r != KZGPU_OK) {
+            printf("FAIL: prover_new_default: %s\n", kzgpu_error_string(r));
+            g_failures++;
+        } else {
+            int bad = 0;
+            for (const auto &v : vectors) {
+                if (!v.valid || v.blob.size() != KZGPU_BYTES_PER_BLOB) continue;
+                std::vector<uint8_t> cells(cellBytes), proofs(proofBytes);
+                if (kzgpu_compute_cells_and_proofs(dp, cells.data(), proofs.data(),
+                                                   v.blob.data()) != KZGPU_OK ||
+                    memcmp(cells.data(), v.cells.data(), cellBytes) != 0 ||
+                    memcmp(proofs.data(), v.proofs.data(), proofBytes) != 0) {
+                    bad++;
+                }
+            }
+            if (bad) {
+                printf("FAIL: embedded-setup prover disagreed on %d vectors\n", bad);
+                g_failures++;
+            } else {
+                printf("ok  : embedded setup reproduces every vector\n");
+                passed++;
+            }
+            kzgpu_prover_free(dp);
+        }
+    }
+
     kzgpu_prover_free(p);
     printf("%s: %d checks\n", g_failures ? "FAILED" : "ok", passed);
     return g_failures ? 1 : 0;

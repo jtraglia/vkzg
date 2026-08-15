@@ -25,6 +25,8 @@ set(GEN_HOST_CONSTANTS ${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/bls12_381_constants.h
 set(GEN_DEV_CONSTANTS  ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/bls12_381_constants.h.inc)
 set(GEN_SHADER_SOURCE  ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/shader_source.h)
 
+set(GEN_SETUP_DATA ${CMAKE_CURRENT_SOURCE_DIR}/src/setup_data.h)
+
 set(SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/layout_defs.h
     ${GEN_DEV_CONSTANTS}
@@ -44,14 +46,23 @@ if(KZGPU_REGENERATE AND Python3_Interpreter_FOUND)
                 ${GEN_SHADER_SOURCE} ${SHADER_SOURCES}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_shaders.py ${SHADER_SOURCES}
         COMMENT "Embedding Metal shader source")
-    add_custom_target(kzgpu_generated DEPENDS ${GEN_SHADER_SOURCE} ${GEN_HOST_CONSTANTS})
+    add_custom_command(
+        OUTPUT ${GEN_SETUP_DATA}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_setup.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/data/trusted_setup.txt ${GEN_SETUP_DATA}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_setup.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/data/trusted_setup.txt
+        COMMENT "Embedding the mainnet trusted setup")
+    add_custom_target(kzgpu_generated
+        DEPENDS ${GEN_SHADER_SOURCE} ${GEN_HOST_CONSTANTS} ${GEN_SETUP_DATA})
 endif()
 
 # ------------------------------------------------------------------ library
 add_library(kzgpu
     src/kzgpu_metal.mm
     src/cpu/bls12_381.cpp
-    src/cpu/setup.cpp)
+    src/cpu/setup.cpp
+    src/setup_data.cpp)
 
 if(TARGET kzgpu_generated)
     add_dependencies(kzgpu kzgpu_generated)
@@ -90,11 +101,15 @@ if(KZGPU_BUILD_TESTS)
     add_executable(test_gpu tests/test_gpu.cpp)
     target_link_libraries(test_gpu PRIVATE kzgpu kzgpu_vectors)
 
+    add_executable(test_setup_data tests/test_setup_data.cpp)
+    target_link_libraries(test_setup_data PRIVATE kzgpu)
+
     set(DATA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/data/trusted_setup.txt)
     set(VEC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tests/vectors)
     add_test(NAME cpu_field COMMAND test_cpu_field)
     add_test(NAME reference COMMAND test_reference ${DATA_DIR} ${VEC_DIR})
     add_test(NAME gpu COMMAND test_gpu ${DATA_DIR} ${VEC_DIR})
+    add_test(NAME setup_data COMMAND test_setup_data ${DATA_DIR})
 endif()
 
 # --------------------------------------------------------------- benchmarks
