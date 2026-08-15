@@ -47,7 +47,6 @@
 #define L_LOAD_CLASSES 64 /* counting-sort bins for the bucket load ordering */
 
 #define L_REDUCE_LANES 8
-#define L_REDUCE_PER_LANE 16 /* L_NUM_BUCKETS / L_REDUCE_LANES */
 #define L_LOG_REDUCE_PER_LANE 4
 #define L_REDUCE_OUTPUTS_PER_TG 16 /* 128 threads / L_REDUCE_LANES */
 

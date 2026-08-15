@@ -100,7 +100,6 @@ struct kzgpu_prover {
     std::mutex mutex;
 
     uint32_t invBlob[kFrLimbs] = {0};
-    uint32_t invExtBlob[kFrLimbs] = {0};
 
     StageTimes lastStage; // filled by computeBatch, read by profile_batch
 };
@@ -261,7 +260,6 @@ kzgpu_result createProver(kzgpu_prover **out, SetupTables &tables, const kzgpu_o
     p->bufKernelPerm =
         makeBufferFrom(p->device, tables.kernel_perm.data(), tables.kernel_perm.size() * 4);
     memcpy(p->invBlob, tables.inv_blob, sizeof(p->invBlob));
-    memcpy(p->invExtBlob, tables.inv_ext_blob, sizeof(p->invExtBlob));
 
     uint32_t batch = opts && opts->max_batch_size ? opts->max_batch_size : 4;
     if (!allocateWorkingSet(p, batch)) {
@@ -307,14 +305,6 @@ kzgpu_result kzgpu_prover_new_default(kzgpu_prover **out, const kzgpu_options *o
     return kzgpu_prover_new(out, kEmbeddedSetupG1Monomial, kEmbeddedSetupSize, opts);
 }
 
-kzgpu_result kzgpu_prover_new_from_file(kzgpu_prover **out, const char *trusted_setup_path,
-                                        const kzgpu_options *opts) {
-    if (!out || !trusted_setup_path) return KZGPU_ERR_BADARGS;
-    std::vector<uint8_t> g1;
-    kzgpu_result rc = read_trusted_setup_file(trusted_setup_path, g1);
-    if (rc != KZGPU_OK) return rc;
-    return kzgpu_prover_new(out, g1.data(), g1.size(), opts);
-}
 
 void kzgpu_prover_free(kzgpu_prover *p) { delete p; }
 
@@ -575,7 +565,6 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
             memcpy(proofs, p->bufProofBytes.contents,
                    (size_t)batch * kCirculantSize * kBytesPerProof);
         }
-        st.gpu_time = (cb.GPUEndTime - cb.GPUStartTime) * 1e3;
         st.total = nowMs() - tStart;
         return KZGPU_OK;
     }

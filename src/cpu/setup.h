@@ -34,8 +34,7 @@ struct SetupTables {
     // group instead of spreading them across all four is worth ~1.3x.
     std::vector<uint32_t> kernel_perm; // kNumBuckets entries
 
-    // 1/8192 and 1/4096 in Montgomery form, for the inverse transforms.
-    uint32_t inv_ext_blob[kFrLimbs];
+    // 1/4096 in Montgomery form, the scale factor for the inverse transform.
     uint32_t inv_blob[kFrLimbs];
 
     // Digest of the trusted setup this was derived from.
@@ -45,9 +44,6 @@ struct SetupTables {
 // Digest of the trusted setup bytes, used to validate the on-disk table cache.
 uint64_t compute_setup_digest(const uint8_t *g1_monomial_bytes, size_t len);
 
-// Parses the standard trusted_setup.txt layout and returns just the monomial
-// G1 section (4096 compressed points).
-kzgpu_result read_trusted_setup_file(const std::string &path, std::vector<uint8_t> &g1_monomial);
 
 // Decompresses the setup and derives every table. `validate` additionally runs
 // on-curve and subgroup checks on all 4096 points.

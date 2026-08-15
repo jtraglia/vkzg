@@ -56,7 +56,6 @@ using namespace metal;
 #define L_LOAD_CLASSES 64 /* counting-sort bins for the bucket load ordering */
 
 #define L_REDUCE_LANES 8
-#define L_REDUCE_PER_LANE 16 /* L_NUM_BUCKETS / L_REDUCE_LANES */
 #define L_LOG_REDUCE_PER_LANE 4
 #define L_REDUCE_OUTPUTS_PER_TG 16 /* 128 threads / L_REDUCE_LANES */
 
@@ -242,12 +241,6 @@ static inline Fr fr_zero() {
     return r;
 }
 
-static inline bool fr_is_zero(thread const Fr &a) {
-    uint acc = 0u;
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FR_NLIMBS; i++) acc |= a.v[i];
-    return acc == 0u;
-}
 
 static inline Fr fr_add(thread const Fr &a, thread const Fr &b) {
     uint t[FR_NLIMBS];
@@ -383,8 +376,6 @@ static inline G1 g1_identity() {
     return r;
 }
 
-static inline bool g1_is_identity(thread const G1 &p) { return fp_is_zero(p.z); }
-
 static inline bool g1a_is_identity(thread const G1A &p) {
     return fp_is_zero(p.x) && fp_is_zero(p.y);
 }
@@ -498,10 +489,6 @@ static inline G1A g1a_load(device const uint *p) {
     return r;
 }
 
-static inline void g1a_store(device uint *p, thread const G1A &a) {
-    fp_store(p, a.x);
-    fp_store(p + FP_NLIMBS, a.y);
-}
 
 static inline G1 g1_load(device const uint *p) {
     G1 r;
@@ -517,25 +504,7 @@ static inline void g1_store(device uint *p, thread const G1 &a) {
     fp_store(p + 2 * FP_NLIMBS, a.z);
 }
 
-static inline G1 g1_load_tg(threadgroup const uint *p) {
-    G1 r;
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FP_NLIMBS; i++) r.x.v[i] = p[i];
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FP_NLIMBS; i++) r.y.v[i] = p[FP_NLIMBS + i];
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FP_NLIMBS; i++) r.z.v[i] = p[2 * FP_NLIMBS + i];
-    return r;
-}
 
-static inline void g1_store_tg(threadgroup uint *p, thread const G1 &a) {
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FP_NLIMBS; i++) p[i] = a.x.v[i];
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FP_NLIMBS; i++) p[FP_NLIMBS + i] = a.y.v[i];
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FP_NLIMBS; i++) p[2 * FP_NLIMBS + i] = a.z.v[i];
-}
 
 static inline Fr fr_load(device const uint *p) {
     Fr r;

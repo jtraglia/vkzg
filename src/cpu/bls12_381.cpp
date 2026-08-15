@@ -34,12 +34,6 @@ inline uint64_t subb(uint64_t a, uint64_t b, uint64_t borrow, uint64_t &r) {
 
 inline uint64_t mulhi(uint64_t a, uint64_t b) { return (uint64_t)(((u128)a * b) >> 64); }
 
-// (hi, lo) = a * b + c + carry
-inline uint64_t mac(uint64_t a, uint64_t b, uint64_t c, uint64_t carry, uint64_t &lo) {
-    u128 t = (u128)a * b + c + carry;
-    lo = (uint64_t)t;
-    return (uint64_t)(t >> 64);
-}
 
 template <int N>
 inline int cmp_n(const uint64_t *a, const uint64_t *b) {
@@ -168,31 +162,6 @@ void mont_mul_fr(uint64_t *r, const uint64_t *a, const uint64_t *b) {
 }
 
 // Coarsely Integrated Operand Scanning Montgomery multiplication.
-// Coarsely Integrated Operand Scanning Montgomery multiplication.
-template <int N>
-void mont_mul_n(uint64_t *r, const uint64_t *a, const uint64_t *b, const uint64_t *mod,
-                uint64_t n0) {
-    uint64_t t[N + 2] = {0};
-    for (int i = 0; i < N; i++) {
-        uint64_t carry = 0;
-        for (int j = 0; j < N; j++) carry = mac(a[j], b[i], t[j], carry, t[j]);
-        uint64_t c2 = addc(t[N], carry, 0, t[N]);
-        t[N + 1] = c2;
-
-        uint64_t m = t[0] * n0;
-        uint64_t discard;
-        carry = mac(m, mod[0], t[0], 0, discard);
-        for (int j = 1; j < N; j++) carry = mac(m, mod[j], t[j], carry, t[j - 1]);
-        c2 = addc(t[N], carry, 0, t[N - 1]);
-        t[N] = t[N + 1] + c2;
-    }
-    // t is < 2*mod at this point; subtract once if needed.
-    uint64_t s[N], borrow = 0;
-    for (int i = 0; i < N; i++) borrow = subb(t[i], mod[i], borrow, s[i]);
-    borrow = subb(t[N], 0, borrow, t[N]);
-    const uint64_t *src = borrow ? t : s;
-    for (int i = 0; i < N; i++) r[i] = src[i];
-}
 
 template <int N>
 void add_mod_n(uint64_t *r, const uint64_t *a, const uint64_t *b, const uint64_t *mod) {
@@ -356,15 +325,6 @@ void fr_to_bytes(uint8_t out[32], const Fr &a) {
     }
 }
 
-void fr_pow(Fr &r, const Fr &a, uint64_t e) {
-    Fr acc = kFrOne, base = a;
-    while (e) {
-        if (e & 1) fr_mul(acc, acc, base);
-        fr_sqr(base, base);
-        e >>= 1;
-    }
-    r = acc;
-}
 
 void fr_inv(Fr &r, const Fr &a) {
     static const uint64_t e[4] = KZGPU_FR_R_MINUS_2;
@@ -752,91 +712,6 @@ void g1_compress(uint8_t out[48], const G1Affine &p) {
     if (fp_is_lexicographically_largest(p.y)) out[0] |= 0x20;
 }
 
-bool glv_split(const Fr &k, uint64_t k1[2], bool &k1_neg, uint64_t k2[2], bool &k2_neg) {
-    // c1 = round(k*(lambda+1)/r) via a precomputed 2^512 reciprocal; c2 is 0 or
-    // -1 because 0 <= k < r.  Then
-    //     k1 = k - c1*lambda + c2,  k2 = c1 + c2*(lambda + 1).
-    static const uint64_t lam[4] = KZGPU_GLV_LAMBDA_INT;
-    static const uint64_t mu[8] = KZGPU_GLV_MU;
-    static const uint64_t rmod[4] = KZGPU_FR_MODULUS_INT;
-
-    uint64_t kk[4];
-    fr_to_canonical(kk, k);
-
-    // prod = k * mu  (4 x 8 limbs -> 12 limbs); c1 = prod >> 512.
-    uint64_t prod[12] = {0};
-    for (int i = 0; i < 4; i++) {
-        uint64_t carry = 0;
-        for (int j = 0; j < 8; j++) carry = mac(kk[i], mu[j], prod[i + j], carry, prod[i + j]);
-        prod[i + 8] += carry;
-    }
-    // Round rather than truncate: add 2^511 before the >> 512.
-    {
-        uint64_t carry = addc(prod[7], 0x8000000000000000ULL, 0, prod[7]);
-        for (int i = 8; i < 12 && carry; i++) carry = addc(prod[i], 0, carry, prod[i]);
-    }
-    uint64_t c1[4] = {prod[8], prod[9], prod[10], prod[11]};
-
-    // c2 = -round(k/r): 1 when k >= r/2, else 0 (stored as magnitude).
-    uint64_t half[4];
-    for (int i = 0; i < 4; i++) half[i] = (rmod[i] >> 1) | (i + 1 < 4 ? rmod[i + 1] << 63 : 0);
-    const bool c2_is_one = cmp_n<4>(kk, half) >= 0;
-
-    // t = c1 * lambda (both ~128 bits, so 4 limbs is plenty for the product).
-    uint64_t t[8] = {0};
-    for (int i = 0; i < 4; i++) {
-        uint64_t carry = 0;
-        for (int j = 0; j < 4; j++) carry = mac(c1[i], lam[j], t[i + j], carry, t[i + j]);
-        t[i + 4] += carry;
-    }
-
-    // k1 = k - t - (c2_is_one ? 1 : 0)
-    uint64_t r1[4];
-    uint64_t borrow = 0;
-    for (int i = 0; i < 4; i++) borrow = subb(kk[i], t[i], borrow, r1[i]);
-    if (c2_is_one) {
-        uint64_t b2 = 0;
-        uint64_t one[4] = {1, 0, 0, 0};
-        for (int i = 0; i < 4; i++) b2 = subb(r1[i], one[i], b2, r1[i]);
-        borrow |= b2;
-    }
-    k1_neg = borrow != 0;
-    if (k1_neg) { // negate: k1 = -(r1) as a magnitude
-        uint64_t carry = 1;
-        for (int i = 0; i < 4; i++) {
-            uint64_t inv = ~r1[i];
-            carry = addc(inv, 0, carry, r1[i]);
-        }
-    }
-
-    // k2 = c1 - (c2_is_one ? lambda + 1 : 0)
-    uint64_t r2[4];
-    if (c2_is_one) {
-        uint64_t lp1[4] = {lam[0], lam[1], lam[2], lam[3]};
-        uint64_t carry = 1;
-        for (int i = 0; i < 4; i++) carry = addc(lp1[i], 0, carry, lp1[i]);
-        uint64_t b = 0;
-        for (int i = 0; i < 4; i++) b = subb(c1[i], lp1[i], b, r2[i]);
-        k2_neg = b != 0;
-    } else {
-        for (int i = 0; i < 4; i++) r2[i] = c1[i];
-        k2_neg = false;
-    }
-    if (k2_neg) {
-        uint64_t carry = 1;
-        for (int i = 0; i < 4; i++) {
-            uint64_t inv = ~r2[i];
-            carry = addc(inv, 0, carry, r2[i]);
-        }
-    }
-
-    if (r1[2] | r1[3] | r2[2] | r2[3]) return false; // wider than 128 bits
-    k1[0] = r1[0];
-    k1[1] = r1[1];
-    k2[0] = r2[0];
-    k2[1] = r2[1];
-    return true;
-}
 
 uint32_t bit_reverse(uint32_t x, uint32_t bits) {
     uint32_t r = 0;

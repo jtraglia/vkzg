@@ -16,8 +16,7 @@ constexpr int kFieldElementsPerBlob = L_FIELD_ELEMENTS_PER_BLOB;
 constexpr int kFieldElementsPerExtBlob = L_FIELD_ELEMENTS_PER_EXT_BLOB;
 constexpr int kFieldElementsPerCell = L_FIELD_ELEMENTS_PER_CELL; // l
 constexpr int kCellsPerBlob = L_CELLS_PER_BLOB;                  // r
-constexpr int kCellsPerExtBlob = L_CELLS_PER_EXT_BLOB;           // n
-constexpr int kCirculantSize = L_CIRCULANT_SIZE;                 // 2r
+constexpr int kCirculantSize = L_CIRCULANT_SIZE; // 2r, and the number of cells
 constexpr int kBytesPerFieldElement = L_BYTES_PER_FIELD_ELEMENT;
 constexpr int kBytesPerProof = L_BYTES_PER_PROOF;
 
@@ -47,15 +46,13 @@ constexpr int kFrLimbs = L_FR_WORDS;
 constexpr int kAffineWords = L_AFFINE_WORDS;
 constexpr int kJacobianWords = L_JACOBIAN_WORDS;
 
-constexpr int kReduceLanes = L_REDUCE_LANES;
-constexpr int kReduceOutputsPerTg = L_REDUCE_OUTPUTS_PER_TG;
 
 // Total number of precomputed setup points: one per (output, base, position).
 constexpr int kPositionTablePoints = kCirculantSize * kPhaseATerms * kNumDigits; // 262144
 constexpr size_t kPositionTableWords = (size_t)kPositionTablePoints * kAffineWords;
 
 // Bump when the on-disk cache layout changes.
-constexpr uint32_t kTableCacheVersion = 4;
+constexpr uint32_t kTableCacheVersion = 5;
 constexpr uint32_t kTableCacheMagic = 0x475A4B50; // "PKZG"
 
 } // namespace kzgpu

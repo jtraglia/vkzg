@@ -5,7 +5,6 @@
 // Montgomery arithmetic, the point formulas and the serialisation all line up
 // with the rest of the ecosystem.
 #include "../src/cpu/bls12_381.h"
-#include "../src/cpu/bls12_381_constants.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -239,58 +238,11 @@ static void test_g1() {
     delete[] aff;
 }
 
-static void test_glv() {
-    static const char *kGenHex =
-        "97f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb";
-    uint8_t gen[48];
-    from_hex(gen, kGenHex, 48);
-    G1Affine g;
-    g1_decompress(g, gen);
-
-    // phi(P) must equal [lambda]P, which g1_affine_in_subgroup already relies on;
-    // check the split reconstructs the scalar: [k]P == [k1]P + [k2]phi(P).
-    G1 G;
-    g1_from_affine(G, g);
-    G1Affine phi;
-    g1_affine_endo(phi, g);
-    CHECK(g1_affine_is_on_curve(phi), "phi(G) is not on the curve");
-
-    for (int i = 0; i < 50; i++) {
-        Fr k = rand_fr();
-        uint64_t k1[2], k2[2];
-        bool n1, n2;
-        CHECK(glv_split(k, k1, n1, k2, n2), "glv_split overflowed");
-
-        // Rebuild k1 + k2*lambda as field elements and compare with k.
-        uint64_t l1[4] = {k1[0], k1[1], 0, 0};
-        uint64_t l2[4] = {k2[0], k2[1], 0, 0};
-        Fr f1, f2, lam, sum;
-        fr_from_canonical(f1, l1);
-        fr_from_canonical(f2, l2);
-        if (n1) fr_neg(f1, f1);
-        if (n2) fr_neg(f2, f2);
-        static const uint64_t lamlimbs[4] = KZGPU_GLV_LAMBDA_INT;
-        fr_from_canonical(lam, lamlimbs);
-        fr_mul(sum, f2, lam);
-        fr_add(sum, sum, f1);
-        CHECK(fr_eq(sum, k), "glv split does not reconstruct k (iteration %d)", i);
-
-        G1 direct, viaGlv, p1, p2;
-        g1_mul(direct, G, k);
-        g1_mul(p1, G, f1);
-        G1 phiJ;
-        g1_from_affine(phiJ, phi);
-        g1_mul(p2, phiJ, f2);
-        g1_add(viaGlv, p1, p2);
-        CHECK(g1_eq(direct, viaGlv), "[k]P != [k1]P + [k2]phi(P)");
-    }
-}
 
 int main() {
     test_fp_basics();
     test_fr_basics();
     test_g1();
-    test_glv();
     std::printf("%s: %d checks, %d failures\n", g_failures ? "FAILED" : "ok", g_checks, g_failures);
     return g_failures ? 1 : 0;
 }

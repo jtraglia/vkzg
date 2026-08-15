@@ -19,7 +19,6 @@ struct StageTimes {
     double reduce_b = 0;
     double normalize_proofs = 0;
     double compress = 0;
-    double gpu_time = 0; // whole command buffer, when not stage-split
     double total = 0;    // wall time including the host memcpys
 };
 

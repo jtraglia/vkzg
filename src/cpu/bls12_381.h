@@ -72,7 +72,6 @@ void fr_neg(Fr &r, const Fr &a);
 void fr_mul(Fr &r, const Fr &a, const Fr &b);
 void fr_sqr(Fr &r, const Fr &a);
 void fr_inv(Fr &r, const Fr &a);
-void fr_pow(Fr &r, const Fr &a, uint64_t e);
 bool fr_is_zero(const Fr &a);
 bool fr_eq(const Fr &a, const Fr &b);
 void fr_from_u64(Fr &r, uint64_t x);
@@ -116,10 +115,6 @@ bool g1_affine_in_subgroup(const G1Affine &p);
 // GLV: phi(x, y) = (beta*x, y) == [lambda](x, y).
 void g1_affine_endo(G1Affine &out, const G1Affine &in);
 
-// Split k into k1 + k2*lambda (mod r) with |k1|, |k2| < 2^128. The outputs are
-// magnitudes plus signs. Returns false if either half exceeded 128 bits, which
-// must not happen for this curve but is checked rather than assumed.
-bool glv_split(const Fr &k, uint64_t k1[2], bool &k1_neg, uint64_t k2[2], bool &k2_neg);
 
 // ---------------------------------------------------------------- utilities
 

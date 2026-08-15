@@ -42,13 +42,13 @@ G1 reduce_buckets(const G1 *buckets) {
 
 } // namespace
 
-void fr_fft_fwd(Fr *data, size_t n, const SetupTables &tables) {
+static void fr_fft_fwd(Fr *data, size_t n, const SetupTables &tables) {
     static thread_local std::vector<Fr> roots;
     if (roots.empty()) roots = device_roots(tables.roots_fwd);
     fr_fft(data, n, roots.data());
 }
 
-void fr_ifft(Fr *data, size_t n, const SetupTables &tables) {
+static void fr_ifft(Fr *data, size_t n, const SetupTables &tables) {
     static thread_local std::vector<Fr> rootsi;
     if (rootsi.empty()) rootsi = device_roots(tables.roots_inv);
     fr_fft(data, n, rootsi.data());
@@ -59,7 +59,7 @@ void fr_ifft(Fr *data, size_t n, const SetupTables &tables) {
     for (size_t i = 0; i < n; i++) fr_mul(data[i], data[i], inv_n);
 }
 
-kzgpu_result blob_to_polynomial(Fr *poly, const uint8_t *blob, const SetupTables &tables) {
+static kzgpu_result blob_to_polynomial(Fr *poly, const uint8_t *blob, const SetupTables &tables) {
     // The blob holds Lagrange-basis evaluations in bit-reversed order.
     std::vector<Fr> lagrange(kFieldElementsPerBlob);
     for (int i = 0; i < kFieldElementsPerBlob; i++) {
@@ -77,7 +77,7 @@ kzgpu_result blob_to_polynomial(Fr *poly, const uint8_t *blob, const SetupTables
     return KZGPU_OK;
 }
 
-void build_circulant_coeffs(Fr coeffs[kCirculantSize][kPhaseATerms], const Fr *poly,
+static void build_circulant_coeffs(Fr coeffs[kCirculantSize][kPhaseATerms], const Fr *poly,
                             const SetupTables &tables) {
     // For each offset i, the first column of the circulant matrix embedding the
     // i-th Toeplitz block, transformed and then transposed into per-output
@@ -95,7 +95,7 @@ void build_circulant_coeffs(Fr coeffs[kCirculantSize][kPhaseATerms], const Fr *p
     }
 }
 
-void phase_a_msm(G1 *u, const Fr coeffs[kCirculantSize][kPhaseATerms], const SetupTables &tables) {
+static void phase_a_msm(G1 *u, const Fr coeffs[kCirculantSize][kPhaseATerms], const SetupTables &tables) {
     for (int j = 0; j < kCirculantSize; j++) {
         G1 buckets[kNumBuckets];
         for (int k = 0; k < kNumBuckets; k++) buckets[k] = kG1Identity;
@@ -184,18 +184,16 @@ void phase_b_via_g1_ffts(G1 *out, const G1 *u, const SetupTables &tables) {
 }
 
 kzgpu_result reference_compute(const SetupTables &tables, const uint8_t *blob, uint8_t *cells,
-                               uint8_t *proofs, ReferenceIntermediates *dbg) {
+                               uint8_t *proofs) {
     std::vector<Fr> poly(kFieldElementsPerBlob);
     kzgpu_result rc = blob_to_polynomial(poly.data(), blob, tables);
     if (rc != KZGPU_OK) return rc;
-    if (dbg) memcpy(dbg->poly, poly.data(), sizeof(Fr) * kFieldElementsPerBlob);
 
     if (cells) {
         std::vector<Fr> ext(kFieldElementsPerExtBlob);
         memcpy(ext.data(), poly.data(), sizeof(Fr) * kFieldElementsPerBlob);
         for (int i = kFieldElementsPerBlob; i < kFieldElementsPerExtBlob; i++) ext[i] = kFrZero;
         fr_fft_fwd(ext.data(), kFieldElementsPerExtBlob, tables);
-        if (dbg) memcpy(dbg->ext_evals, ext.data(), sizeof(Fr) * kFieldElementsPerExtBlob);
         for (int i = 0; i < kFieldElementsPerExtBlob; i++) {
             uint32_t dst = bit_reverse((uint32_t)i, 13);
             fr_to_bytes(cells + (size_t)dst * kBytesPerFieldElement, ext[i]);
@@ -203,20 +201,15 @@ kzgpu_result reference_compute(const SetupTables &tables, const uint8_t *blob, u
     }
 
     if (proofs) {
-        static thread_local std::vector<Fr> flat;
-        std::vector<std::vector<Fr>> tmp;
         auto coeffs = new Fr[kCirculantSize][kPhaseATerms];
         build_circulant_coeffs(coeffs, poly.data(), tables);
-        if (dbg) memcpy(dbg->coeffs, coeffs, sizeof(Fr) * kCirculantSize * kPhaseATerms);
 
         std::vector<G1> u(kCirculantSize);
         phase_a_msm(u.data(), coeffs, tables);
         delete[] coeffs;
-        if (dbg) memcpy(dbg->u, u.data(), sizeof(G1) * kCirculantSize);
 
         std::vector<G1> pr(kCirculantSize);
         phase_b_circulant(pr.data(), u.data(), tables);
-        if (dbg) memcpy(dbg->proofs, pr.data(), sizeof(G1) * kCirculantSize);
 
         // Bit-reverse into cell order, then serialise.
         std::vector<G1> brp(kCirculantSize);

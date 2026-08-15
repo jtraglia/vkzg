@@ -170,45 +170,6 @@ uint64_t compute_setup_digest(const uint8_t *g1_monomial_bytes, size_t len) {
     return fnv1a(g1_monomial_bytes, len);
 }
 
-kzgpu_result read_trusted_setup_file(const std::string &path, std::vector<uint8_t> &g1_monomial) {
-    FILE *f = fopen(path.c_str(), "r");
-    if (!f) return KZGPU_ERR_IO;
-    uint64_t n1 = 0, n2 = 0;
-    if (fscanf(f, "%llu", (unsigned long long *)&n1) != 1 ||
-        fscanf(f, "%llu", (unsigned long long *)&n2) != 1) {
-        fclose(f);
-        return KZGPU_ERR_SETUP;
-    }
-    if (n1 != KZGPU_NUM_SETUP_G1_POINTS) {
-        fclose(f);
-        return KZGPU_ERR_SETUP;
-    }
-
-    auto skip_hex = [&](size_t nbytes) {
-        for (size_t i = 0; i < nbytes; i++) {
-            unsigned v;
-            if (fscanf(f, "%2x", &v) != 1) return false;
-        }
-        return true;
-    };
-
-    // Lagrange G1 section, then G2, then the monomial G1 section we want.
-    if (!skip_hex((size_t)n1 * KZGPU_BYTES_PER_G1) || !skip_hex((size_t)n2 * 96)) {
-        fclose(f);
-        return KZGPU_ERR_SETUP;
-    }
-    g1_monomial.resize((size_t)n1 * KZGPU_BYTES_PER_G1);
-    for (size_t i = 0; i < g1_monomial.size(); i++) {
-        unsigned v;
-        if (fscanf(f, "%2x", &v) != 1) {
-            fclose(f);
-            return KZGPU_ERR_SETUP;
-        }
-        g1_monomial[i] = (uint8_t)v;
-    }
-    fclose(f);
-    return KZGPU_OK;
-}
 
 kzgpu_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool validate,
                                 SetupTables &out) {
@@ -253,9 +214,6 @@ kzgpu_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bo
     }
     {
         Fr t, inv;
-        fr_from_u64(t, kFieldElementsPerExtBlob);
-        fr_inv(inv, t);
-        fr_to_device(out.inv_ext_blob, inv);
         fr_from_u64(t, kFieldElementsPerBlob);
         fr_inv(inv, t);
         fr_to_device(out.inv_blob, inv);
@@ -398,7 +356,6 @@ kzgpu_result load_table_cache(const std::string &path, uint64_t expected_digest,
         !read_exact(f, out.kernel_items.data(), h.kernel_items * 4) ||
         !read_exact(f, out.kernel_offsets.data(), h.kernel_offsets * 4) ||
         !read_exact(f, out.kernel_perm.data(), h.kernel_perm * 4) ||
-        !read_exact(f, out.inv_ext_blob, sizeof(out.inv_ext_blob)) ||
         !read_exact(f, out.inv_blob, sizeof(out.inv_blob))) {
         goto done;
     }
@@ -428,7 +385,6 @@ kzgpu_result save_table_cache(const std::string &path, const SetupTables &in) {
               write_exact(f, in.kernel_items.data(), in.kernel_items.size() * 4) &&
               write_exact(f, in.kernel_offsets.data(), in.kernel_offsets.size() * 4) &&
               write_exact(f, in.kernel_perm.data(), in.kernel_perm.size() * 4) &&
-              write_exact(f, in.inv_ext_blob, sizeof(in.inv_ext_blob)) &&
               write_exact(f, in.inv_blob, sizeof(in.inv_blob));
     fclose(f);
     if (!ok) {

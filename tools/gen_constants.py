@@ -161,12 +161,10 @@ def main():
     h.append(f"#define KZGPU_FP_N0 0x{n0(P, 64):016x}ULL\n")
     h.append(f"#define KZGPU_FP_R {{ {fmt(to_mont(1, P, 384), 6, 64)} }}\n")
     h.append(f"#define KZGPU_FP_R2 {{ {fmt(to_mont(to_mont(1, P, 384), P, 384), 6, 64)} }}\n")
-    h.append(f"#define KZGPU_FP_R3 {{ {fmt(to_mont(to_mont(to_mont(1, P, 384), P, 384), P, 384), 6, 64)} }}\n")
     # (p - 3) / 4 : exponent for the square root used in point decompression
     h.append(f"#define KZGPU_FP_P_MINUS_3_DIV_4 {{ {fmt((P - 3) // 4, 6, 64)} }}\n")
     h.append(f"#define KZGPU_FP_P_MINUS_2 {{ {fmt(P - 2, 6, 64)} }}\n")
     h.append(f"#define KZGPU_FP_BETA {{ {fmt(to_mont(BETA, P, 384), 6, 64)} }}\n")
-    h.append(f"#define KZGPU_FP_B3 {{ {fmt(to_mont(4, P, 384), 6, 64)} }} /* curve b = 4 */\n")
     h.append("\n/* Scalar field r (255 bits), 4 x 64-bit limbs. */\n")
     h.append(f"#define KZGPU_FR_R_MOD {{ {fmt(R, 4, 64)} }}\n")
     h.append(f"#define KZGPU_FR_N0 0x{n0(R, 64):016x}ULL\n")
@@ -174,18 +172,9 @@ def main():
     h.append(f"#define KZGPU_FR_R2 {{ {fmt(to_mont(to_mont(1, R, 256), R, 256), 4, 64)} }}\n")
     h.append(f"#define KZGPU_FR_R_MINUS_2 {{ {fmt(R - 2, 4, 64)} }}\n")
     h.append(f"#define KZGPU_FR_ROOT_8192 {{ {fmt(to_mont(root8192, R, 256), 4, 64)} }}\n")
-    h.append(f"#define KZGPU_FR_LAMBDA {{ {fmt(to_mont(LAMBDA, R, 256), 4, 64)} }}\n")
-    h.append("\n/* G1 generator, Montgomery form. */\n")
-    h.append(f"#define KZGPU_G1_GX {{ {fmt(to_mont(GX, P, 384), 6, 64)} }}\n")
-    h.append(f"#define KZGPU_G1_GY {{ {fmt(to_mont(GY, P, 384), 6, 64)} }}\n")
     # GLV split needs lambda as a plain integer (it is only ~128 bits) and r.
-    h.append("\n/* GLV: lambda is short over Z (lambda^2 + lambda + 1 == r). */\n")
+    h.append("\n/* GLV endomorphism, used by the subgroup check. */\n")
     h.append(f"#define KZGPU_GLV_LAMBDA_INT {{ {fmt(b1[0], 4, 64)} }}\n")
-    h.append(f"#define KZGPU_FR_MODULUS_INT {{ {fmt(R, 4, 64)} }}\n")
-    # Reciprocal for the Babai rounding: mu = floor(2^512 * (lambda+1) / r).
-    mu = ((b1[0] + 1) << 512) // R
-    assert mu.bit_length() <= 512
-    h.append(f"#define KZGPU_GLV_MU {{ {fmt(mu, 8, 64)} }}\n")
     open(host_path, "w").write("".join(h))
 
     # -------------------------------------------------------------- device
