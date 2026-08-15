@@ -1,12 +1,34 @@
-// BLS12-381 arithmetic for Metal.
+// BLS12-381 arithmetic for GLSL compute shaders (Vulkan).
 //
 // Fp is 12 x 32-bit limbs, Fr is 8 x 32-bit limbs, both little-endian and in
-// Montgomery form.  Multiplication is CIOS with a 64-bit accumulator: on Apple7
-// that measured ~374M Fp multiplies/s, about 25% faster than hand-rolled 32-bit
-// carry chains, because the compiler maps `(ulong)a*b` onto mul/mulhi directly.
+// Montgomery form.  Multiplication is CIOS with a 64-bit accumulator, mapping
+// onto the same widening-multiply hardware path Metal's `(ulong)a*b` used.
 //
-// The constants block (FP_P, FP_N0, ...) is prepended from
-// bls12_381_constants.h.inc, which is generated alongside the host constants.
+// The constants block (FP_P, FP_N0, ...) is included from
+// bls12_381_constants.glsl.inc, which is generated alongside the host
+// constants so the two limb representations cannot drift.
+//
+// Buffers are passed between host and shader as raw GPU addresses
+// (VK_KHR_buffer_device_address) rather than descriptor-bound arrays, so
+// every kernel's buffer arguments are `buffer_reference` pointers -- the
+// closest GLSL analogue of Metal's `device T *` arguments, and it keeps the
+// shape of the kernels below close to the .metal originals.
+
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_ARB_gpu_shader_int64 : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+
+#include "layout_defs.h"
+#include "bls12_381_constants.glsl.inc"
+
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer U32Buf { uint v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 2) buffer U16Buf { uint16_t v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 1) buffer U8Buf { uint8_t v[]; };
 
 // ---------------------------------------------------------------------- Fp
 
@@ -18,257 +40,227 @@ struct Fr {
     uint v[FR_NLIMBS];
 };
 
-static inline Fp fp_zero() {
+Fp fp_zero() {
     Fp r;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = 0u;
     return r;
 }
 
-static inline Fp fp_one() {
+Fp fp_one() {
     Fp r;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = FP_R[i];
     return r;
 }
 
-static inline bool fp_is_zero(thread const Fp &a) {
+bool fp_is_zero(Fp a) {
     uint acc = 0u;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FP_NLIMBS; i++) acc |= a.v[i];
     return acc == 0u;
 }
 
-static inline bool fp_eq(thread const Fp &a, thread const Fp &b) {
+bool fp_eq(Fp a, Fp b) {
     uint acc = 0u;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FP_NLIMBS; i++) acc |= (a.v[i] ^ b.v[i]);
     return acc == 0u;
 }
 
-static inline Fp fp_add(thread const Fp &a, thread const Fp &b) {
+Fp fp_add(Fp a, Fp b) {
     uint t[FP_NLIMBS];
     uint carry = 0u;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FP_NLIMBS; i++) {
-        ulong s = (ulong)a.v[i] + (ulong)b.v[i] + (ulong)carry;
-        t[i] = (uint)s;
-        carry = (uint)(s >> 32);
+        uint64_t s = uint64_t(a.v[i]) + uint64_t(b.v[i]) + uint64_t(carry);
+        t[i] = uint(s);
+        carry = uint(s >> 32);
     }
     // p has room in the top limb, so the sum never overflows 12 limbs.
     uint s2[FP_NLIMBS];
     uint borrow = 0u;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FP_NLIMBS; i++) {
-        ulong d = (ulong)t[i] - (ulong)FP_P[i] - (ulong)borrow;
-        s2[i] = (uint)d;
-        borrow = (uint)((d >> 32) & 1u);
+        uint64_t d = uint64_t(t[i]) - uint64_t(FP_P[i]) - uint64_t(borrow);
+        s2[i] = uint(d);
+        borrow = uint((d >> 32) & 1ul);
     }
     Fp r;
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = borrow ? t[i] : s2[i];
+    for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = borrow != 0u ? t[i] : s2[i];
     return r;
 }
 
-static inline Fp fp_sub(thread const Fp &a, thread const Fp &b) {
+Fp fp_sub(Fp a, Fp b) {
     uint t[FP_NLIMBS];
     uint borrow = 0u;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FP_NLIMBS; i++) {
-        ulong d = (ulong)a.v[i] - (ulong)b.v[i] - (ulong)borrow;
-        t[i] = (uint)d;
-        borrow = (uint)((d >> 32) & 1u);
+        uint64_t d = uint64_t(a.v[i]) - uint64_t(b.v[i]) - uint64_t(borrow);
+        t[i] = uint(d);
+        borrow = uint((d >> 32) & 1ul);
     }
     uint carry = 0u;
-    uint mask = borrow ? 0xffffffffu : 0u;
+    uint mask = borrow != 0u ? 0xffffffffu : 0u;
     Fp r;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FP_NLIMBS; i++) {
-        ulong s = (ulong)t[i] + (ulong)(FP_P[i] & mask) + (ulong)carry;
-        r.v[i] = (uint)s;
-        carry = (uint)(s >> 32);
+        uint64_t s = uint64_t(t[i]) + uint64_t(FP_P[i] & mask) + uint64_t(carry);
+        r.v[i] = uint(s);
+        carry = uint(s >> 32);
     }
     return r;
 }
 
-static inline Fp fp_neg(thread const Fp &a) {
+Fp fp_neg(Fp a) {
     if (fp_is_zero(a)) return a;
-    Fp z = fp_zero();
-    return fp_sub(z, a);
+    return fp_sub(fp_zero(), a);
 }
 
-static inline Fp fp_dbl(thread const Fp &a) { return fp_add(a, a); }
+Fp fp_dbl(Fp a) { return fp_add(a, a); }
 
-static inline Fp fp_mul(thread const Fp &a, thread const Fp &b) {
+Fp fp_mul(Fp a, Fp b) {
     uint t[FP_NLIMBS + 2];
-#pragma clang loop unroll(full)
     for (int i = 0; i < FP_NLIMBS + 2; i++) t[i] = 0u;
 
-#pragma clang loop unroll(full)
     for (int i = 0; i < FP_NLIMBS; i++) {
         uint c = 0u;
         const uint bi = b.v[i];
-#pragma clang loop unroll(full)
         for (int j = 0; j < FP_NLIMBS; j++) {
-            ulong s = (ulong)a.v[j] * (ulong)bi + (ulong)t[j] + (ulong)c;
-            t[j] = (uint)s;
-            c = (uint)(s >> 32);
+            uint64_t s = uint64_t(a.v[j]) * uint64_t(bi) + uint64_t(t[j]) + uint64_t(c);
+            t[j] = uint(s);
+            c = uint(s >> 32);
         }
-        ulong s = (ulong)t[FP_NLIMBS] + (ulong)c;
-        t[FP_NLIMBS] = (uint)s;
-        t[FP_NLIMBS + 1] = (uint)(s >> 32);
+        uint64_t s = uint64_t(t[FP_NLIMBS]) + uint64_t(c);
+        t[FP_NLIMBS] = uint(s);
+        t[FP_NLIMBS + 1] = uint(s >> 32);
 
         const uint m = t[0] * FP_N0;
-        ulong s0 = (ulong)m * (ulong)FP_P[0] + (ulong)t[0];
-        c = (uint)(s0 >> 32);
-#pragma clang loop unroll(full)
+        uint64_t s0 = uint64_t(m) * uint64_t(FP_P[0]) + uint64_t(t[0]);
+        c = uint(s0 >> 32);
         for (int j = 1; j < FP_NLIMBS; j++) {
-            ulong sj = (ulong)m * (ulong)FP_P[j] + (ulong)t[j] + (ulong)c;
-            t[j - 1] = (uint)sj;
-            c = (uint)(sj >> 32);
+            uint64_t sj = uint64_t(m) * uint64_t(FP_P[j]) + uint64_t(t[j]) + uint64_t(c);
+            t[j - 1] = uint(sj);
+            c = uint(sj >> 32);
         }
-        ulong sn = (ulong)t[FP_NLIMBS] + (ulong)c;
-        t[FP_NLIMBS - 1] = (uint)sn;
-        t[FP_NLIMBS] = t[FP_NLIMBS + 1] + (uint)(sn >> 32);
+        uint64_t sn = uint64_t(t[FP_NLIMBS]) + uint64_t(c);
+        t[FP_NLIMBS - 1] = uint(sn);
+        t[FP_NLIMBS] = t[FP_NLIMBS + 1] + uint(sn >> 32);
     }
 
     // The CIOS result is below 2p; subtract once when needed.
     uint s2[FP_NLIMBS];
     uint borrow = 0u;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FP_NLIMBS; i++) {
-        ulong d = (ulong)t[i] - (ulong)FP_P[i] - (ulong)borrow;
-        s2[i] = (uint)d;
-        borrow = (uint)((d >> 32) & 1u);
+        uint64_t d = uint64_t(t[i]) - uint64_t(FP_P[i]) - uint64_t(borrow);
+        s2[i] = uint(d);
+        borrow = uint((d >> 32) & 1ul);
     }
     borrow = (t[FP_NLIMBS] < borrow) ? 1u : 0u;
     Fp r;
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = borrow ? t[i] : s2[i];
+    for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = borrow != 0u ? t[i] : s2[i];
     return r;
 }
 
-static inline Fp fp_sqr(thread const Fp &a) { return fp_mul(a, a); }
+Fp fp_sqr(Fp a) { return fp_mul(a, a); }
 
 // ---------------------------------------------------------------------- Fr
 
-static inline Fr fr_zero() {
+Fr fr_zero() {
     Fr r;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = 0u;
     return r;
 }
 
-
-static inline Fr fr_add(thread const Fr &a, thread const Fr &b) {
+Fr fr_add(Fr a, Fr b) {
     uint t[FR_NLIMBS];
     uint carry = 0u;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FR_NLIMBS; i++) {
-        ulong s = (ulong)a.v[i] + (ulong)b.v[i] + (ulong)carry;
-        t[i] = (uint)s;
-        carry = (uint)(s >> 32);
+        uint64_t s = uint64_t(a.v[i]) + uint64_t(b.v[i]) + uint64_t(carry);
+        t[i] = uint(s);
+        carry = uint(s >> 32);
     }
     uint s2[FR_NLIMBS];
     uint borrow = 0u;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FR_NLIMBS; i++) {
-        ulong d = (ulong)t[i] - (ulong)FR_P[i] - (ulong)borrow;
-        s2[i] = (uint)d;
-        borrow = (uint)((d >> 32) & 1u);
+        uint64_t d = uint64_t(t[i]) - uint64_t(FR_P[i]) - uint64_t(borrow);
+        s2[i] = uint(d);
+        borrow = uint((d >> 32) & 1ul);
     }
     Fr r;
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = borrow ? t[i] : s2[i];
+    for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = borrow != 0u ? t[i] : s2[i];
     return r;
 }
 
-static inline Fr fr_sub(thread const Fr &a, thread const Fr &b) {
+Fr fr_sub(Fr a, Fr b) {
     uint t[FR_NLIMBS];
     uint borrow = 0u;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FR_NLIMBS; i++) {
-        ulong d = (ulong)a.v[i] - (ulong)b.v[i] - (ulong)borrow;
-        t[i] = (uint)d;
-        borrow = (uint)((d >> 32) & 1u);
+        uint64_t d = uint64_t(a.v[i]) - uint64_t(b.v[i]) - uint64_t(borrow);
+        t[i] = uint(d);
+        borrow = uint((d >> 32) & 1ul);
     }
-    uint mask = borrow ? 0xffffffffu : 0u;
+    uint mask = borrow != 0u ? 0xffffffffu : 0u;
     uint carry = 0u;
     Fr r;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FR_NLIMBS; i++) {
-        ulong s = (ulong)t[i] + (ulong)(FR_P[i] & mask) + (ulong)carry;
-        r.v[i] = (uint)s;
-        carry = (uint)(s >> 32);
+        uint64_t s = uint64_t(t[i]) + uint64_t(FR_P[i] & mask) + uint64_t(carry);
+        r.v[i] = uint(s);
+        carry = uint(s >> 32);
     }
     return r;
 }
 
-static inline Fr fr_mul(thread const Fr &a, thread const Fr &b) {
+Fr fr_mul(Fr a, Fr b) {
     uint t[FR_NLIMBS + 2];
-#pragma clang loop unroll(full)
     for (int i = 0; i < FR_NLIMBS + 2; i++) t[i] = 0u;
 
-#pragma clang loop unroll(full)
     for (int i = 0; i < FR_NLIMBS; i++) {
         uint c = 0u;
         const uint bi = b.v[i];
-#pragma clang loop unroll(full)
         for (int j = 0; j < FR_NLIMBS; j++) {
-            ulong s = (ulong)a.v[j] * (ulong)bi + (ulong)t[j] + (ulong)c;
-            t[j] = (uint)s;
-            c = (uint)(s >> 32);
+            uint64_t s = uint64_t(a.v[j]) * uint64_t(bi) + uint64_t(t[j]) + uint64_t(c);
+            t[j] = uint(s);
+            c = uint(s >> 32);
         }
-        ulong s = (ulong)t[FR_NLIMBS] + (ulong)c;
-        t[FR_NLIMBS] = (uint)s;
-        t[FR_NLIMBS + 1] = (uint)(s >> 32);
+        uint64_t s = uint64_t(t[FR_NLIMBS]) + uint64_t(c);
+        t[FR_NLIMBS] = uint(s);
+        t[FR_NLIMBS + 1] = uint(s >> 32);
 
         const uint m = t[0] * FR_N0;
-        ulong s0 = (ulong)m * (ulong)FR_P[0] + (ulong)t[0];
-        c = (uint)(s0 >> 32);
-#pragma clang loop unroll(full)
+        uint64_t s0 = uint64_t(m) * uint64_t(FR_P[0]) + uint64_t(t[0]);
+        c = uint(s0 >> 32);
         for (int j = 1; j < FR_NLIMBS; j++) {
-            ulong sj = (ulong)m * (ulong)FR_P[j] + (ulong)t[j] + (ulong)c;
-            t[j - 1] = (uint)sj;
-            c = (uint)(sj >> 32);
+            uint64_t sj = uint64_t(m) * uint64_t(FR_P[j]) + uint64_t(t[j]) + uint64_t(c);
+            t[j - 1] = uint(sj);
+            c = uint(sj >> 32);
         }
-        ulong sn = (ulong)t[FR_NLIMBS] + (ulong)c;
-        t[FR_NLIMBS - 1] = (uint)sn;
-        t[FR_NLIMBS] = t[FR_NLIMBS + 1] + (uint)(sn >> 32);
+        uint64_t sn = uint64_t(t[FR_NLIMBS]) + uint64_t(c);
+        t[FR_NLIMBS - 1] = uint(sn);
+        t[FR_NLIMBS] = t[FR_NLIMBS + 1] + uint(sn >> 32);
     }
 
     uint s2[FR_NLIMBS];
     uint borrow = 0u;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FR_NLIMBS; i++) {
-        ulong d = (ulong)t[i] - (ulong)FR_P[i] - (ulong)borrow;
-        s2[i] = (uint)d;
-        borrow = (uint)((d >> 32) & 1u);
+        uint64_t d = uint64_t(t[i]) - uint64_t(FR_P[i]) - uint64_t(borrow);
+        s2[i] = uint(d);
+        borrow = uint((d >> 32) & 1ul);
     }
     borrow = (t[FR_NLIMBS] < borrow) ? 1u : 0u;
     Fr r;
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = borrow ? t[i] : s2[i];
+    for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = borrow != 0u ? t[i] : s2[i];
     return r;
 }
 
 // Leaves Montgomery form: multiplying by 1 divides out R.
-static inline Fr fr_to_canonical(thread const Fr &a) {
+Fr fr_to_canonical(Fr a) {
     Fr one = fr_zero();
     one.v[0] = 1u;
     return fr_mul(a, one);
 }
 
 // Enters Montgomery form.
-static inline Fr fr_from_canonical(thread const Fr &a) {
+Fr fr_from_canonical(Fr a) {
     Fr r2;
-#pragma clang loop unroll(full)
     for (int i = 0; i < FR_NLIMBS; i++) r2.v[i] = FR_R2[i];
     return fr_mul(a, r2);
 }
 
 // true when a < r, i.e. the value is a canonical field element.
-static inline bool fr_is_canonical(thread const Fr &a) {
+bool fr_is_canonical(Fr a) {
     for (int i = FR_NLIMBS - 1; i >= 0; i--) {
         if (a.v[i] != FR_P[i]) return a.v[i] < FR_P[i];
     }
@@ -286,7 +278,7 @@ struct G1A {
     Fp x, y;
 };
 
-static inline G1 g1_identity() {
+G1 g1_identity() {
     G1 r;
     r.x = fp_zero();
     r.y = fp_one();
@@ -294,12 +286,12 @@ static inline G1 g1_identity() {
     return r;
 }
 
-static inline bool g1a_is_identity(thread const G1A &p) {
+bool g1a_is_identity(G1A p) {
     return fp_is_zero(p.x) && fp_is_zero(p.y);
 }
 
 // dbl-2009-l, for curves with a == 0.
-static inline G1 g1_dbl(thread const G1 &p) {
+G1 g1_dbl(G1 p) {
     if (fp_is_zero(p.z)) return p;
     Fp A = fp_sqr(p.x);
     Fp B = fp_sqr(p.y);
@@ -322,7 +314,7 @@ static inline G1 g1_dbl(thread const G1 &p) {
 }
 
 // add-2007-bl
-static inline G1 g1_add(thread const G1 &a, thread const G1 &b) {
+G1 g1_add(G1 a, G1 b) {
     if (fp_is_zero(a.z)) return b;
     if (fp_is_zero(b.z)) return a;
     Fp Z1Z1 = fp_sqr(a.z);
@@ -353,7 +345,7 @@ static inline G1 g1_add(thread const G1 &a, thread const G1 &b) {
 }
 
 // madd-2007-bl: Jacobian + affine.
-static inline G1 g1_madd(thread const G1 &a, thread const G1A &b) {
+G1 g1_madd(G1 a, G1A b) {
     if (g1a_is_identity(b)) return a;
     if (fp_is_zero(a.z)) {
         G1 r;
@@ -387,65 +379,59 @@ static inline G1 g1_madd(thread const G1 &a, thread const G1A &b) {
 }
 
 // ------------------------------------------------------------ memory access
+//
+// Buffers are buffer_reference pointers; `off` is a 32-bit element index
+// (word/limb/byte index depending on the buffer's element type), matching
+// the word offsets the .metal originals computed before dereferencing.
 
-static inline Fp fp_load(device const uint *p) {
+Fp fp_load(U32Buf buf, uint off) {
     Fp r;
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = p[i];
+    for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = buf.v[off + i];
     return r;
 }
 
-static inline void fp_store(device uint *p, thread const Fp &a) {
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FP_NLIMBS; i++) p[i] = a.v[i];
+void fp_store(U32Buf buf, uint off, Fp a) {
+    for (int i = 0; i < FP_NLIMBS; i++) buf.v[off + i] = a.v[i];
 }
 
-static inline G1A g1a_load(device const uint *p) {
+G1A g1a_load(U32Buf buf, uint off) {
     G1A r;
-    r.x = fp_load(p);
-    r.y = fp_load(p + FP_NLIMBS);
+    r.x = fp_load(buf, off);
+    r.y = fp_load(buf, off + FP_NLIMBS);
     return r;
 }
 
-
-static inline G1 g1_load(device const uint *p) {
+G1 g1_load(U32Buf buf, uint off) {
     G1 r;
-    r.x = fp_load(p);
-    r.y = fp_load(p + FP_NLIMBS);
-    r.z = fp_load(p + 2 * FP_NLIMBS);
+    r.x = fp_load(buf, off);
+    r.y = fp_load(buf, off + FP_NLIMBS);
+    r.z = fp_load(buf, off + 2 * FP_NLIMBS);
     return r;
 }
 
-static inline void g1_store(device uint *p, thread const G1 &a) {
-    fp_store(p, a.x);
-    fp_store(p + FP_NLIMBS, a.y);
-    fp_store(p + 2 * FP_NLIMBS, a.z);
+void g1_store(U32Buf buf, uint off, G1 a) {
+    fp_store(buf, off, a.x);
+    fp_store(buf, off + FP_NLIMBS, a.y);
+    fp_store(buf, off + 2 * FP_NLIMBS, a.z);
 }
 
-
-
-static inline Fr fr_load(device const uint *p) {
+Fr fr_load(U32Buf buf, uint off) {
     Fr r;
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = p[i];
+    for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = buf.v[off + i];
     return r;
 }
 
-static inline void fr_store(device uint *p, thread const Fr &a) {
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FR_NLIMBS; i++) p[i] = a.v[i];
+void fr_store(U32Buf buf, uint off, Fr a) {
+    for (int i = 0; i < FR_NLIMBS; i++) buf.v[off + i] = a.v[i];
 }
 
 // ---------------------------------------------------- SIMD-group reduction
 
-static inline G1 g1_shuffle_down(thread const G1 &p, ushort delta) {
+G1 g1_shuffle_down(G1 p, uint delta) {
     G1 r;
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FP_NLIMBS; i++) r.x.v[i] = simd_shuffle_down(p.x.v[i], delta);
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FP_NLIMBS; i++) r.y.v[i] = simd_shuffle_down(p.y.v[i], delta);
-#pragma clang loop unroll(full)
-    for (int i = 0; i < FP_NLIMBS; i++) r.z.v[i] = simd_shuffle_down(p.z.v[i], delta);
+    for (int i = 0; i < FP_NLIMBS; i++) r.x.v[i] = subgroupShuffleDown(p.x.v[i], delta);
+    for (int i = 0; i < FP_NLIMBS; i++) r.y.v[i] = subgroupShuffleDown(p.y.v[i], delta);
+    for (int i = 0; i < FP_NLIMBS; i++) r.z.v[i] = subgroupShuffleDown(p.z.v[i], delta);
     return r;
 }
 
@@ -453,18 +439,9 @@ static inline G1 g1_shuffle_down(thread const G1 &p, ushort delta) {
 //
 // L_REDUCE_LANES lanes cooperate on one output, each first collapsing a
 // contiguous run of buckets with a serial running sum, then combining across
-// lanes with a shuffle tree.  The split matters: a pure shuffle tree over all
-// 128 buckets executes at full SIMD width on every level, so 32 lanes do the
-// work of one useful merge -- measured 40ms per phase.  Doing the bulk serially
-// inside a lane and only the last log2(L_REDUCE_LANES) levels as a tree keeps
-// the wasted width down while keeping the dependency chain short.
-//
-// Merging two adjacent ranges of h lanes each:
-//     rs = rs_lo + rs_hi
-//     w  = w_lo + w_hi + h * s_hi
-//     s  = s_lo + s_hi
-// and h is a power of two, so the scaling is doublings.
-static inline G1 reduce_buckets(device const uint *buckets, uint pos) {
+// lanes with a shuffle tree.  See kernels/k_bucket_reduce.comp for why the
+// split matters; the maths is unchanged from the Metal original.
+G1 reduce_buckets(U32Buf buckets, uint base, uint pos) {
     const uint per_lane = L_NUM_BUCKETS / L_REDUCE_LANES;
 
     // Serial running sum over this lane's slice, from the top down, giving
@@ -472,14 +449,14 @@ static inline G1 reduce_buckets(device const uint *buckets, uint pos) {
     G1 s = g1_identity();
     G1 rs = g1_identity();
     for (uint i = per_lane; i-- > 0u;) {
-        const G1 bk = g1_load(buckets + (ulong)(pos * per_lane + i) * L_JACOBIAN_WORDS);
+        const G1 bk = g1_load(buckets, base + (pos * per_lane + i) * L_JACOBIAN_WORDS);
         s = g1_add(s, bk);
         rs = g1_add(rs, s);
     }
     G1 w = g1_identity();
 
     for (uint level = 0u; (1u << level) < L_REDUCE_LANES; level++) {
-        const ushort h = (ushort)(1u << level);
+        const uint h = 1u << level;
         // Every lane must reach the shuffle, so compute first and commit after.
         const G1 sb = g1_shuffle_down(s, h);
         const G1 wb = g1_shuffle_down(w, h);
@@ -505,20 +482,18 @@ static inline G1 reduce_buckets(device const uint *buckets, uint pos) {
 // ------------------------------------------------------- inversion, encoding
 
 // a^(p-2) by square-and-multiply.  ~381 squarings and ~190 multiplies, so the
-// dependency chain is ~570 F_p multiplies deep -- about 2ms on this GPU.  That
-// is a fixed cost per dispatch regardless of how many points are being
-// normalised, which is why the batched Montgomery trick around it matters: one
-// inversion serves a whole chunk.
-static inline Fp fp_inv(thread const Fp &a) {
+// dependency chain is ~570 F_p multiplies deep.  That is a fixed cost per
+// dispatch regardless of how many points are being normalised, which is why
+// the batched Montgomery trick around it matters: one inversion serves a
+// whole chunk.
+Fp fp_inv(Fp a) {
     Fp acc = a;
     bool started = false;
-#pragma clang loop unroll(disable)
     for (int i = FP_NLIMBS - 1; i >= 0; i--) {
         const uint limb = FP_P_MINUS_2[i];
-#pragma clang loop unroll(disable)
         for (int b = 31; b >= 0; b--) {
             if (started) acc = fp_sqr(acc);
-            if ((limb >> b) & 1u) {
+            if (((limb >> b) & 1u) != 0u) {
                 if (started) {
                     acc = fp_mul(acc, a);
                 } else {
@@ -532,7 +507,7 @@ static inline Fp fp_inv(thread const Fp &a) {
 }
 
 // Leaves Montgomery form: multiplying by 1 divides out R.
-static inline Fp fp_to_canonical(thread const Fp &a) {
+Fp fp_to_canonical(Fp a) {
     Fp one = fp_zero();
     one.v[0] = 1u;
     return fp_mul(a, one);
@@ -540,9 +515,11 @@ static inline Fp fp_to_canonical(thread const Fp &a) {
 
 // True when the canonical representative exceeds (p-1)/2, which is the sign bit
 // the compressed encoding carries.
-static inline bool fp_is_lex_largest(thread const Fp &canonical) {
+bool fp_is_lex_largest(Fp canonical) {
     for (int i = FP_NLIMBS - 1; i >= 0; i--) {
         if (canonical.v[i] != FP_P_HALF[i]) return canonical.v[i] > FP_P_HALF[i];
     }
     return false;
 }
+
+uint brev(uint x, uint bits) { return bitfieldReverse(x) >> (32u - bits); }

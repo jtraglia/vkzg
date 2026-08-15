@@ -2,11 +2,11 @@
  * Single source of truth for the sizes shared between host and device.
  *
  * This file is plain #defines so that it can be included by C++ *and*
- * concatenated into the Metal shader source.  internal.h turns these
+ * included into the GLSL shader sources.  internal.h turns these
  * into typed constexprs for the host; the shaders use the macros directly.
  */
-#ifndef METAL_PROVER_LAYOUT_DEFS_H
-#define METAL_PROVER_LAYOUT_DEFS_H
+#ifndef VULKAN_PROVER_LAYOUT_DEFS_H
+#define VULKAN_PROVER_LAYOUT_DEFS_H
 
 #define L_FIELD_ELEMENTS_PER_BLOB 4096
 #define L_FIELD_ELEMENTS_PER_EXT_BLOB 8192
@@ -56,4 +56,4 @@
 #define L_LOG_REDUCE_PER_LANE 5
 #define L_REDUCE_OUTPUTS_PER_TG 32 /* 128 threads / L_REDUCE_LANES */
 
-#endif /* METAL_PROVER_LAYOUT_DEFS_H */
+#endif /* VULKAN_PROVER_LAYOUT_DEFS_H */

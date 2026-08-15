@@ -3,7 +3,7 @@
 // This is deliberately a small, self-contained implementation rather than a
 // dependency on blst: the host only needs it for trusted-setup precomputation,
 // the short serialisation tail, and as a reference oracle in tests.  All the
-// throughput-critical arithmetic lives in the Metal shaders.
+// throughput-critical arithmetic lives in the GLSL shaders.
 //
 // Field elements are held in Montgomery form (R = 2^384 for Fp, R = 2^256 for
 // Fr) with little-endian 64-bit limbs.
@@ -13,7 +13,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace mp {
+namespace vkp {
 
 struct Fp {
     uint64_t v[6];
@@ -121,4 +121,4 @@ void g1_affine_endo(G1Affine &out, const G1Affine &in);
 void batch_inverse(Fp *out, const Fp *in, size_t n);
 uint32_t bit_reverse(uint32_t x, uint32_t bits);
 
-} // namespace mp
+} // namespace vkp

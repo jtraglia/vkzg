@@ -1,4 +1,4 @@
-// Layout constants shared by the host code and the Metal shaders.
+// Layout constants shared by the host code and the GLSL shaders.
 //
 // The numeric values live in layout_defs.h, which is also concatenated into the
 // shader source, so host and device cannot disagree about a size.
@@ -9,7 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace mp {
+namespace vkp {
 
 // ---------------------------------------------------------------- protocol
 constexpr int kFieldElementsPerBlob = L_FIELD_ELEMENTS_PER_BLOB;
@@ -55,4 +55,4 @@ constexpr size_t kPositionTableWords = (size_t)kPositionTablePoints * kAffineWor
 constexpr uint32_t kTableCacheVersion = 5;
 constexpr uint32_t kTableCacheMagic = 0x475A4B50; // "PKZG"
 
-} // namespace mp
+} // namespace vkp

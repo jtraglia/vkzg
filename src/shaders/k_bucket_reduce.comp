@@ -1,0 +1,35 @@
+// One subgroup serves L_REDUCE_LANES-sized teams; a 128-thread workgroup
+// therefore reduces 16 outputs at once with no shared memory at all.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t outAddr;
+    uint64_t bucketsAddr;
+    uint count;
+} pc;
+
+void main() {
+    U32Buf outBuf = U32Buf(pc.outAddr);
+    U32Buf bucketsBuf = U32Buf(pc.bucketsAddr);
+
+    const uint tid = gl_LocalInvocationID.x;
+    const uint team = tid / L_REDUCE_LANES;
+    const uint pos = tid % L_REDUCE_LANES;
+    // `count` need not be a multiple of the 16 outputs a workgroup covers.
+    // Teams past the end are clamped onto the last valid output rather than
+    // returning early: reduce_buckets exchanges points with subgroup
+    // shuffles, and those require every lane in the group to participate.
+    const uint raw = gl_WorkGroupID.x * L_REDUCE_OUTPUTS_PER_TG + team;
+    const uint j = min(raw, pc.count - 1u);
+    const uint b = gl_WorkGroupID.y;
+
+    const uint base = (b * L_CIRCULANT_SIZE * L_NUM_BUCKETS + j * L_NUM_BUCKETS) * L_JACOBIAN_WORDS;
+    const G1 total = reduce_buckets(bucketsBuf, base, pos);
+    if (pos == 0u && raw < pc.count) {
+        g1_store(outBuf, (b * L_CIRCULANT_SIZE + j) * L_JACOBIAN_WORDS, total);
+    }
+}

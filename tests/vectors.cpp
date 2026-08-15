@@ -4,7 +4,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 
-namespace mp_test {
+namespace vkp_test {
 
 std::vector<Vector> load_all(const std::string &dir) {
     std::vector<std::string> names;
@@ -27,4 +27,4 @@ std::vector<Vector> load_all(const std::string &dir) {
     return out;
 }
 
-} // namespace mp_test
+} // namespace vkp_test

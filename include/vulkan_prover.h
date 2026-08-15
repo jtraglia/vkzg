@@ -1,5 +1,5 @@
 /*
- * metal-prover -- EIP-7594 cell KZG proof generation on Apple GPUs.
+ * vulkan-prover -- EIP-7594 cell KZG proof generation on the GPU via Vulkan.
  *
  * The whole pipeline runs on the GPU: one command buffer per call, with the
  * host doing nothing but copying blobs in and cells/proofs out.  That is
@@ -8,14 +8,14 @@
  *
  * The API is intentionally plain C so that Rust, Go, Java (JNI/Panama) and
  * others can bind to it without a C++ shim.  All functions are thread safe
- * unless stated otherwise; a single `mp_prover` may be shared between
+ * unless stated otherwise; a single `vkp_prover` may be shared between
  * threads, and concurrent calls are serialised internally per GPU queue.
  *
  * This library only *produces* cells and proofs.  Verification is deliberately
  * out of scope.
  */
-#ifndef METAL_PROVER_H
-#define METAL_PROVER_H
+#ifndef VULKAN_PROVER_H
+#define VULKAN_PROVER_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -26,32 +26,32 @@ extern "C" {
 
 /* ------------------------------------------------------------------ sizes */
 
-#define MP_FIELD_ELEMENTS_PER_BLOB 4096
-#define MP_FIELD_ELEMENTS_PER_EXT_BLOB 8192
-#define MP_FIELD_ELEMENTS_PER_CELL 64
-#define MP_CELLS_PER_EXT_BLOB 128
-#define MP_BYTES_PER_FIELD_ELEMENT 32
-#define MP_BYTES_PER_BLOB (MP_FIELD_ELEMENTS_PER_BLOB * MP_BYTES_PER_FIELD_ELEMENT)
-#define MP_BYTES_PER_CELL (MP_FIELD_ELEMENTS_PER_CELL * MP_BYTES_PER_FIELD_ELEMENT)
-#define MP_BYTES_PER_PROOF 48
+#define VKP_FIELD_ELEMENTS_PER_BLOB 4096
+#define VKP_FIELD_ELEMENTS_PER_EXT_BLOB 8192
+#define VKP_FIELD_ELEMENTS_PER_CELL 64
+#define VKP_CELLS_PER_EXT_BLOB 128
+#define VKP_BYTES_PER_FIELD_ELEMENT 32
+#define VKP_BYTES_PER_BLOB (VKP_FIELD_ELEMENTS_PER_BLOB * VKP_BYTES_PER_FIELD_ELEMENT)
+#define VKP_BYTES_PER_CELL (VKP_FIELD_ELEMENTS_PER_CELL * VKP_BYTES_PER_FIELD_ELEMENT)
+#define VKP_BYTES_PER_PROOF 48
 /* Number of G1 points in the monomial-form trusted setup we consume. */
-#define MP_NUM_SETUP_G1_POINTS MP_FIELD_ELEMENTS_PER_BLOB
-#define MP_BYTES_PER_G1 48
+#define VKP_NUM_SETUP_G1_POINTS VKP_FIELD_ELEMENTS_PER_BLOB
+#define VKP_BYTES_PER_G1 48
 
 /* ----------------------------------------------------------------- status */
 
 typedef enum {
-    MP_OK = 0,
-    MP_ERR_BADARGS = 1,     /* caller passed a null/invalid argument */
-    MP_ERR_MALLOC = 2,      /* host allocation failed */
-    MP_ERR_IO = 3,          /* trusted setup or cache file could not be read */
-    MP_ERR_SETUP = 4,       /* trusted setup was malformed or off-curve */
-    MP_ERR_GPU = 5,         /* no Metal device, or a shader failed to build */
-    MP_ERR_INVALID_BLOB = 6 /* a field element in the blob was not canonical */
-} mp_result;
+    VKP_OK = 0,
+    VKP_ERR_BADARGS = 1,     /* caller passed a null/invalid argument */
+    VKP_ERR_MALLOC = 2,      /* host allocation failed */
+    VKP_ERR_IO = 3,          /* trusted setup or cache file could not be read */
+    VKP_ERR_SETUP = 4,       /* trusted setup was malformed or off-curve */
+    VKP_ERR_GPU = 5,         /* no Vulkan device, or a shader failed to build */
+    VKP_ERR_INVALID_BLOB = 6 /* a field element in the blob was not canonical */
+} vkp_result;
 
 /* Human readable form of a status code. Never returns NULL. */
-const char *mp_error_string(mp_result r);
+const char *vkp_error_string(vkp_result r);
 
 /* ---------------------------------------------------------------- options */
 
@@ -79,14 +79,14 @@ typedef struct {
      * 2 MiB per blob).  0 selects a sensible default.
      */
     uint32_t max_batch_size;
-} mp_options;
+} vkp_options;
 
 /* Fills `opts` with the recommended defaults. */
-void mp_options_default(mp_options *opts);
+void vkp_options_default(vkp_options *opts);
 
 /* ----------------------------------------------------------------- prover */
 
-typedef struct mp_prover mp_prover;
+typedef struct vkp_prover vkp_prover;
 
 /*
  * Build a prover using the Ethereum mainnet trusted setup, which is compiled
@@ -94,39 +94,39 @@ typedef struct mp_prover mp_prover;
  * are fixed for the lifetime of the protocol, so there is no file to ship,
  * locate or validate at runtime.
  */
-mp_result mp_prover_new_default(mp_prover **out, const mp_options *opts);
+vkp_result vkp_prover_new_default(vkp_prover **out, const vkp_options *opts);
 
 /*
  * Build a prover from a caller-supplied monomial-form G1 trusted setup, for
  * testnets or a future ceremony.
  *
- * `g1_monomial_bytes` is MP_NUM_SETUP_G1_POINTS compressed points
+ * `g1_monomial_bytes` is VKP_NUM_SETUP_G1_POINTS compressed points
  * (48 bytes each), in the same order and encoding c-kzg-4844 uses.
  */
-mp_result mp_prover_new(mp_prover **out, const uint8_t *g1_monomial_bytes,
-                              size_t g1_monomial_len, const mp_options *opts);
+vkp_result vkp_prover_new(vkp_prover **out, const uint8_t *g1_monomial_bytes,
+                              size_t g1_monomial_len, const vkp_options *opts);
 
 
-void mp_prover_free(mp_prover *p);
+void vkp_prover_free(vkp_prover *p);
 
-/* Name of the Metal device in use, e.g. "Apple M1". Valid for the prover's lifetime. */
-const char *mp_prover_device_name(const mp_prover *p);
+/* Name of the Vulkan device in use, e.g. "Apple M1 (G13G B1)". Valid for the prover's lifetime. */
+const char *vkp_prover_device_name(const vkp_prover *p);
 
 /* ---------------------------------------------------------------- compute */
 
 /*
  * Compute all 128 cells and all 128 cell proofs for one blob.
  *
- * `blob`   is MP_BYTES_PER_BLOB bytes: 4096 big-endian canonical field
+ * `blob`   is VKP_BYTES_PER_BLOB bytes: 4096 big-endian canonical field
  *          elements.
- * `cells`  receives MP_CELLS_PER_EXT_BLOB * MP_BYTES_PER_CELL bytes, or
+ * `cells`  receives VKP_CELLS_PER_EXT_BLOB * VKP_BYTES_PER_CELL bytes, or
  *          NULL if the caller only wants proofs.
- * `proofs` receives MP_CELLS_PER_EXT_BLOB * MP_BYTES_PER_PROOF bytes, or
+ * `proofs` receives VKP_CELLS_PER_EXT_BLOB * VKP_BYTES_PER_PROOF bytes, or
  *          NULL if the caller only wants cells.
  *
  * At least one of `cells` and `proofs` must be non-NULL.
  */
-mp_result mp_compute_cells_and_proofs(mp_prover *p, uint8_t *cells, uint8_t *proofs,
+vkp_result vkp_compute_cells_and_proofs(vkp_prover *p, uint8_t *cells, uint8_t *proofs,
                                             const uint8_t *blob);
 
 /*
@@ -135,11 +135,11 @@ mp_result mp_compute_cells_and_proofs(mp_prover *p, uint8_t *cells, uint8_t *pro
  * the GPU saturated and is markedly more efficient per blob than repeated
  * single calls -- this is the entry point supernodes should use.
  */
-mp_result mp_compute_cells_and_proofs_batch(mp_prover *p, uint8_t *cells, uint8_t *proofs,
+vkp_result vkp_compute_cells_and_proofs_batch(vkp_prover *p, uint8_t *cells, uint8_t *proofs,
                                                   const uint8_t *blobs, size_t num_blobs);
 
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
 
-#endif /* METAL_PROVER_H */
+#endif /* VULKAN_PROVER_H */

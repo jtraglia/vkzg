@@ -1,0 +1,47 @@
+// Affine proofs -> 48-byte compressed encoding, applying the bit-reversal
+// permutation on the way out (FK20 emits natural order; cells are indexed
+// bit-reversed).
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t outAddr;
+    uint64_t affineAddr;
+} pc;
+
+void main() {
+    U8Buf outBuf = U8Buf(pc.outAddr);
+    U32Buf affineBuf = U32Buf(pc.affineAddr);
+
+    const uint i = gl_GlobalInvocationID.x;
+    const uint b = gl_GlobalInvocationID.y;
+    const G1A p = g1a_load(affineBuf, (b * L_CIRCULANT_SIZE + i) * L_AFFINE_WORDS);
+    const uint dst = brev(i, L_LOG_CIRCULANT);
+    const uint obase = (b * L_CIRCULANT_SIZE + dst) * L_BYTES_PER_PROOF;
+
+    if (g1a_is_identity(p)) {
+        for (int k = 0; k < L_BYTES_PER_PROOF; k++) outBuf.v[obase + k] = uint8_t(0);
+        outBuf.v[obase] = uint8_t(0xc0); // compressed | infinity
+        return;
+    }
+
+    Fp x = p.x;
+    Fp y = p.y;
+    x = fp_to_canonical(x);
+    y = fp_to_canonical(y);
+    // 12 little-endian 32-bit limbs -> 48 big-endian bytes.
+    for (int limb = 0; limb < FP_NLIMBS; limb++) {
+        const uint w = x.v[limb];
+        const uint off = uint(FP_NLIMBS - 1 - limb) * 4u;
+        outBuf.v[obase + off + 0] = uint8_t(w >> 24);
+        outBuf.v[obase + off + 1] = uint8_t(w >> 16);
+        outBuf.v[obase + off + 2] = uint8_t(w >> 8);
+        outBuf.v[obase + off + 3] = uint8_t(w);
+    }
+    uint flags = 0x80u; // compressed
+    if (fp_is_lex_largest(y)) flags |= 0x20u;
+    outBuf.v[obase] = uint8_t(uint(outBuf.v[obase]) | flags);
+}

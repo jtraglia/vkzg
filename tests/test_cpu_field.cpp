@@ -11,7 +11,7 @@
 #include <cstring>
 #include <string>
 
-using namespace mp;
+using namespace vkp;
 
 static int g_failures = 0;
 static int g_checks = 0;

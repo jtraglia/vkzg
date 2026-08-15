@@ -1,0 +1,44 @@
+// Phase A, curve pass: fixed-base bucket MSM against the precomputed setup.
+// One thread per bucket, no shared memory.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = L_NUM_BUCKETS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t bucketsAddr;
+    uint64_t itemsAddr;
+    uint64_t startsAddr;
+    uint64_t permAddr;
+    uint64_t tableAddr;
+} pc;
+
+void main() {
+    U32Buf bucketsBuf = U32Buf(pc.bucketsAddr);
+    U16Buf itemsBuf = U16Buf(pc.itemsAddr);
+    U32Buf startsBuf = U32Buf(pc.startsAddr);
+    U32Buf permBuf = U32Buf(pc.permAddr);
+    U32Buf tableBuf = U32Buf(pc.tableAddr);
+
+    const uint tid = gl_LocalInvocationID.x;
+    const uint j = gl_WorkGroupID.x;
+    const uint b = gl_WorkGroupID.y;
+    const uint out_index = b * L_CIRCULANT_SIZE + j;
+
+    const uint bucket = permBuf.v[out_index * L_NUM_BUCKETS + tid];
+    const uint starts_base = out_index * (L_NUM_BUCKETS + 1);
+    const uint items_base = out_index * L_PHASE_A_ITEMS;
+    const uint lo = startsBuf.v[starts_base + bucket];
+    const uint hi = startsBuf.v[starts_base + bucket + 1u];
+
+    const uint tbase = j * L_PHASE_A_TERMS * L_NUM_DIGITS * L_AFFINE_WORDS;
+    G1 acc = g1_identity();
+    for (uint it = lo; it < hi; it++) {
+        const uint packed = uint(itemsBuf.v[items_base + it]);
+        G1A pt = g1a_load(tableBuf, tbase + ((packed >> 6) * L_NUM_DIGITS + ((packed >> 1) & 31u)) * L_AFFINE_WORDS);
+        if ((packed & 1u) != 0u) pt.y = fp_neg(pt.y);
+        acc = g1_madd(acc, pt);
+    }
+    g1_store(bucketsBuf, (b * L_CIRCULANT_SIZE * L_NUM_BUCKETS + j * L_NUM_BUCKETS + bucket) * L_JACOBIAN_WORDS, acc);
+}

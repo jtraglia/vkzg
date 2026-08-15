@@ -1,5 +1,5 @@
 // End-to-end GPU tests against the consensus-spec vectors.
-#include "../include/metal_prover.h"
+#include "../include/vulkan_prover.h"
 #include "vectors.h"
 
 #include <atomic>
@@ -30,38 +30,38 @@ static std::string hex(const uint8_t *b, size_t n) {
 int main(int argc, char **argv) {
     const char *vec_dir = argc > 1 ? argv[1] : "tests/vectors";
 
-    mp_options opts;
-    mp_options_default(&opts);
-    opts.table_cache_path = "/tmp/mp_prover_tables_v3.cache";
+    vkp_options opts;
+    vkp_options_default(&opts);
+    opts.table_cache_path = "/tmp/vkp_prover_tables_v3.cache";
     opts.max_batch_size = 4;
 
-    mp_prover *p = nullptr;
+    vkp_prover *p = nullptr;
     double t0 = now_ms();
-    mp_result rc = mp_prover_new_default(&p, &opts);
-    if (rc != MP_OK) {
-        printf("FAIL: prover_new: %s\n", mp_error_string(rc));
+    vkp_result rc = vkp_prover_new_default(&p, &opts);
+    if (rc != VKP_OK) {
+        printf("FAIL: prover_new: %s\n", vkp_error_string(rc));
         return 1;
     }
-    printf("prover ready on %s in %.0f ms\n", mp_prover_device_name(p), now_ms() - t0);
+    printf("prover ready on %s in %.0f ms\n", vkp_prover_device_name(p), now_ms() - t0);
 
-    auto vectors = mp_test::load_all(vec_dir);
+    auto vectors = vkp_test::load_all(vec_dir);
     if (vectors.empty()) {
         printf("FAIL: no vectors in %s\n", vec_dir);
         return 1;
     }
 
-    const size_t cellBytes = (size_t)MP_CELLS_PER_EXT_BLOB * MP_BYTES_PER_CELL;
-    const size_t proofBytes = (size_t)MP_CELLS_PER_EXT_BLOB * MP_BYTES_PER_PROOF;
+    const size_t cellBytes = (size_t)VKP_CELLS_PER_EXT_BLOB * VKP_BYTES_PER_CELL;
+    const size_t proofBytes = (size_t)VKP_CELLS_PER_EXT_BLOB * VKP_BYTES_PER_PROOF;
 
     int passed = 0;
     for (const auto &v : vectors) {
         std::vector<uint8_t> cells(cellBytes), proofs(proofBytes);
-        mp_result r = v.blob.size() == MP_BYTES_PER_BLOB
-                             ? mp_compute_cells_and_proofs(p, cells.data(), proofs.data(),
+        vkp_result r = v.blob.size() == VKP_BYTES_PER_BLOB
+                             ? vkp_compute_cells_and_proofs(p, cells.data(), proofs.data(),
                                                               v.blob.data())
-                             : MP_ERR_BADARGS;
+                             : VKP_ERR_BADARGS;
         if (!v.valid) {
-            if (r == MP_OK) {
+            if (r == VKP_OK) {
                 printf("FAIL %s: expected rejection, got success\n", v.name.c_str());
                 g_failures++;
             } else {
@@ -69,8 +69,8 @@ int main(int argc, char **argv) {
             }
             continue;
         }
-        if (r != MP_OK) {
-            printf("FAIL %s: %s\n", v.name.c_str(), mp_error_string(r));
+        if (r != VKP_OK) {
+            printf("FAIL %s: %s\n", v.name.c_str(), vkp_error_string(r));
             g_failures++;
             continue;
         }
@@ -103,20 +103,20 @@ int main(int argc, char **argv) {
 
     // Batched path must agree with the single-blob path.
     {
-        std::vector<const mp_test::Vector *> valid;
+        std::vector<const vkp_test::Vector *> valid;
         for (const auto &v : vectors) {
-            if (v.valid && v.blob.size() == MP_BYTES_PER_BLOB) valid.push_back(&v);
+            if (v.valid && v.blob.size() == VKP_BYTES_PER_BLOB) valid.push_back(&v);
         }
         const size_t n = valid.size();
         if (n >= 2) {
-            std::vector<uint8_t> blobs(n * MP_BYTES_PER_BLOB);
+            std::vector<uint8_t> blobs(n * VKP_BYTES_PER_BLOB);
             for (size_t i = 0; i < n; i++) {
-                memcpy(&blobs[i * MP_BYTES_PER_BLOB], valid[i]->blob.data(), MP_BYTES_PER_BLOB);
+                memcpy(&blobs[i * VKP_BYTES_PER_BLOB], valid[i]->blob.data(), VKP_BYTES_PER_BLOB);
             }
             std::vector<uint8_t> cells(n * cellBytes), proofs(n * proofBytes);
-            mp_result r = mp_compute_cells_and_proofs_batch(p, cells.data(), proofs.data(),
+            vkp_result r = vkp_compute_cells_and_proofs_batch(p, cells.data(), proofs.data(),
                                                                   blobs.data(), n);
-            bool ok = r == MP_OK;
+            bool ok = r == VKP_OK;
             for (size_t i = 0; ok && i < n; i++) {
                 ok &= memcmp(&cells[i * cellBytes], valid[i]->cells.data(), cellBytes) == 0;
                 ok &= memcmp(&proofs[i * proofBytes], valid[i]->proofs.data(), proofBytes) == 0;
@@ -133,21 +133,21 @@ int main(int argc, char **argv) {
 
     // ---------------------------------------------------------- API contract
     {
-        const mp_test::Vector *v = nullptr;
+        const vkp_test::Vector *v = nullptr;
         for (const auto &x : vectors) {
-            if (x.valid && x.blob.size() == MP_BYTES_PER_BLOB) v = &x;
+            if (x.valid && x.blob.size() == VKP_BYTES_PER_BLOB) v = &x;
         }
         std::vector<uint8_t> cells(cellBytes), proofs(proofBytes);
 
         // cells-only and proofs-only must match the combined call.
-        if (mp_compute_cells_and_proofs(p, cells.data(), nullptr, v->blob.data()) != MP_OK ||
+        if (vkp_compute_cells_and_proofs(p, cells.data(), nullptr, v->blob.data()) != VKP_OK ||
             memcmp(cells.data(), v->cells.data(), cellBytes) != 0) {
             printf("FAIL: cells-only path\n");
             g_failures++;
         } else {
             passed++;
         }
-        if (mp_compute_cells_and_proofs(p, nullptr, proofs.data(), v->blob.data()) != MP_OK ||
+        if (vkp_compute_cells_and_proofs(p, nullptr, proofs.data(), v->blob.data()) != VKP_OK ||
             memcmp(proofs.data(), v->proofs.data(), proofBytes) != 0) {
             printf("FAIL: proofs-only path\n");
             g_failures++;
@@ -158,25 +158,25 @@ int main(int argc, char **argv) {
         // Argument validation.
         struct {
             const char *what;
-            mp_result got;
+            vkp_result got;
         } checks[] = {
-            {"null prover", mp_compute_cells_and_proofs(nullptr, cells.data(), proofs.data(),
+            {"null prover", vkp_compute_cells_and_proofs(nullptr, cells.data(), proofs.data(),
                                                            v->blob.data())},
-            {"null blob", mp_compute_cells_and_proofs(p, cells.data(), proofs.data(), nullptr)},
+            {"null blob", vkp_compute_cells_and_proofs(p, cells.data(), proofs.data(), nullptr)},
             {"no outputs requested",
-             mp_compute_cells_and_proofs(p, nullptr, nullptr, v->blob.data())},
+             vkp_compute_cells_and_proofs(p, nullptr, nullptr, v->blob.data())},
         };
         for (const auto &c : checks) {
-            if (c.got != MP_ERR_BADARGS) {
-                printf("FAIL: %s should be rejected, got %s\n", c.what, mp_error_string(c.got));
+            if (c.got != VKP_ERR_BADARGS) {
+                printf("FAIL: %s should be rejected, got %s\n", c.what, vkp_error_string(c.got));
                 g_failures++;
             } else {
                 passed++;
             }
         }
         // Zero blobs is a no-op, not an error.
-        if (mp_compute_cells_and_proofs_batch(p, cells.data(), proofs.data(), v->blob.data(),
-                                                 0) != MP_OK) {
+        if (vkp_compute_cells_and_proofs_batch(p, cells.data(), proofs.data(), v->blob.data(),
+                                                 0) != VKP_OK) {
             printf("FAIL: zero-length batch should succeed\n");
             g_failures++;
         } else {
@@ -185,13 +185,13 @@ int main(int argc, char **argv) {
 
         // A batch larger than max_batch_size must chunk transparently.
         const size_t big = 9; // max_batch_size is 4 above
-        std::vector<uint8_t> blobs(big * MP_BYTES_PER_BLOB), bc(big * cellBytes),
+        std::vector<uint8_t> blobs(big * VKP_BYTES_PER_BLOB), bc(big * cellBytes),
             bp(big * proofBytes);
         for (size_t i = 0; i < big; i++) {
-            memcpy(&blobs[i * MP_BYTES_PER_BLOB], v->blob.data(), MP_BYTES_PER_BLOB);
+            memcpy(&blobs[i * VKP_BYTES_PER_BLOB], v->blob.data(), VKP_BYTES_PER_BLOB);
         }
-        bool ok = mp_compute_cells_and_proofs_batch(p, bc.data(), bp.data(), blobs.data(),
-                                                       big) == MP_OK;
+        bool ok = vkp_compute_cells_and_proofs_batch(p, bc.data(), bp.data(), blobs.data(),
+                                                       big) == VKP_OK;
         for (size_t i = 0; ok && i < big; i++) {
             ok &= memcmp(&bc[i * cellBytes], v->cells.data(), cellBytes) == 0;
             ok &= memcmp(&bp[i * proofBytes], v->proofs.data(), proofBytes) == 0;
@@ -208,9 +208,9 @@ int main(int argc, char **argv) {
     // ------------------------------------------------------------ concurrency
     // The header promises a prover may be shared between threads.
     {
-        std::vector<const mp_test::Vector *> valid;
+        std::vector<const vkp_test::Vector *> valid;
         for (const auto &x : vectors) {
-            if (x.valid && x.blob.size() == MP_BYTES_PER_BLOB) valid.push_back(&x);
+            if (x.valid && x.blob.size() == VKP_BYTES_PER_BLOB) valid.push_back(&x);
         }
         std::atomic<int> bad{0};
         std::vector<std::thread> threads;
@@ -219,8 +219,8 @@ int main(int argc, char **argv) {
                 std::vector<uint8_t> cells(cellBytes), proofs(proofBytes);
                 for (int r = 0; r < 3; r++) {
                     const auto *v = valid[(size_t)(t + r) % valid.size()];
-                    if (mp_compute_cells_and_proofs(p, cells.data(), proofs.data(),
-                                                       v->blob.data()) != MP_OK ||
+                    if (vkp_compute_cells_and_proofs(p, cells.data(), proofs.data(),
+                                                       v->blob.data()) != VKP_OK ||
                         memcmp(proofs.data(), v->proofs.data(), proofBytes) != 0 ||
                         memcmp(cells.data(), v->cells.data(), cellBytes) != 0) {
                         bad++;
@@ -238,7 +238,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    mp_prover_free(p);
+    vkp_prover_free(p);
     printf("%s: %d checks\n", g_failures ? "FAILED" : "ok", passed);
     return g_failures ? 1 : 0;
 }

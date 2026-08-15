@@ -3,11 +3,11 @@
 // Not part of the public API.  Recorded by the real compute path.
 #pragma once
 
-#include "../include/metal_prover.h"
+#include "../include/vulkan_prover.h"
 
 #include <cstddef>
 
-namespace mp {
+namespace vkp {
 
 struct StageTimes {
     double scalar_stage = 0; // blob deserialise, both NTTs, cells, circulant
@@ -23,7 +23,7 @@ struct StageTimes {
 };
 
 // Runs the normal compute path and reports what it measured.
-mp_result profile_batch(mp_prover *p, unsigned char *cells, unsigned char *proofs,
+vkp_result profile_batch(vkp_prover *p, unsigned char *cells, unsigned char *proofs,
                            const unsigned char *blobs, unsigned batch, StageTimes &out);
 
-} // namespace mp
+} // namespace vkp

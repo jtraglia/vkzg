@@ -1,0 +1,115 @@
+// Phase A, scalar pass: signed-digit recoding, histogram, load ordering and
+// bucket sort for one output.  64 threads, one per scalar.
+//
+// Split from the curve pass (k_phase_a.comp) on purpose: the recoding, the
+// histogram and the bucket sort together are a small fraction of phase A's
+// runtime, but keeping them in the same kernel as the accumulation forces one
+// register allocation and one shared-memory footprint for both, and occupancy
+// is exactly what the accumulation is short of.  Separated, the curve kernel
+// needs no shared memory at all.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = L_PHASE_A_TERMS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t itemsAddr;
+    uint64_t startsAddr;
+    uint64_t permAddr;
+    uint64_t coeffsAddr;
+} pc;
+
+shared uint tg_count[L_NUM_BUCKETS];
+shared uint tg_start[L_NUM_BUCKETS + 1];
+shared uint tg_hist[L_LOAD_CLASSES];
+
+void main() {
+    U16Buf itemsBuf = U16Buf(pc.itemsAddr);
+    U32Buf startsBuf = U32Buf(pc.startsAddr);
+    U32Buf permBuf = U32Buf(pc.permAddr);
+    U32Buf coeffsBuf = U32Buf(pc.coeffsAddr);
+
+    const uint tid = gl_LocalInvocationID.x;
+    const uint j = gl_WorkGroupID.x;
+    const uint b = gl_WorkGroupID.y;
+    const uint out_index = b * L_CIRCULANT_SIZE + j;
+    const uint items_base = out_index * L_PHASE_A_ITEMS;
+    const uint starts_base = out_index * (L_NUM_BUCKETS + 1);
+    const uint perm_base = out_index * L_NUM_BUCKETS;
+
+    if (tid < L_NUM_BUCKETS / 2u) {
+        tg_count[tid] = 0u;
+        tg_count[tid + L_NUM_BUCKETS / 2u] = 0u;
+    }
+    barrier();
+
+    // digit = byte + carry, borrowing into the next digit past the half window.
+    // Every scalar is below r < 2^255, so the carry chain always terminates
+    // inside 32 digits and no 33rd digit is ever needed.
+    Fr scalar = fr_load(coeffsBuf, (b * L_CIRCULANT_SIZE * L_PHASE_A_TERMS + j * L_PHASE_A_TERMS + tid) * FR_NLIMBS);
+    scalar = fr_to_canonical(scalar);
+    int carry = 0;
+    for (uint dd = 0u; dd < L_NUM_DIGITS; dd++) {
+        const uint byte = (scalar.v[dd >> 2] >> ((dd & 3u) * 8u)) & 0xffu;
+        int v = int(byte) + carry;
+        carry = 0;
+        if (v > L_NUM_BUCKETS) {
+            v -= 2 * L_NUM_BUCKETS;
+            carry = 1;
+        }
+        if (v != 0) {
+            atomicAdd(tg_count[uint(abs(v)) - 1u], 1u);
+        }
+    }
+    barrier();
+
+    if (tid == 0u) {
+        uint acc = 0u;
+        for (uint k = 0u; k < L_NUM_BUCKETS; k++) {
+            tg_start[k] = acc;
+            acc += tg_count[k];
+            tg_count[k] = tg_start[k];
+        }
+        tg_start[L_NUM_BUCKETS] = acc;
+
+        // Order the buckets by descending load before handing them to lanes.
+        // A subgroup runs until its slowest lane finishes, and loads are
+        // Poisson(16); counting sort into L_LOAD_CLASSES bins, heaviest first.
+        for (uint c = 0u; c < L_LOAD_CLASSES; c++) tg_hist[c] = 0u;
+        for (uint k = 0u; k < L_NUM_BUCKETS; k++) {
+            tg_hist[min(tg_start[k + 1u] - tg_start[k], uint(L_LOAD_CLASSES) - 1u)]++;
+        }
+        uint pos = 0u;
+        for (uint c = L_LOAD_CLASSES; c-- > 0u;) {
+            const uint n = tg_hist[c];
+            tg_hist[c] = pos;
+            pos += n;
+            if (c == 0u) break;
+        }
+        for (uint k = 0u; k < L_NUM_BUCKETS; k++) {
+            const uint cls = min(tg_start[k + 1u] - tg_start[k], uint(L_LOAD_CLASSES) - 1u);
+            permBuf.v[perm_base + tg_hist[cls]] = k;
+            tg_hist[cls]++;
+        }
+        for (uint k = 0u; k <= L_NUM_BUCKETS; k++) startsBuf.v[starts_base + k] = tg_start[k];
+    }
+    barrier();
+
+    // Scatter into bucket order; tg_count is now a per-bucket write cursor.
+    carry = 0;
+    for (uint dd = 0u; dd < L_NUM_DIGITS; dd++) {
+        const uint byte = (scalar.v[dd >> 2] >> ((dd & 3u) * 8u)) & 0xffu;
+        int v = int(byte) + carry;
+        carry = 0;
+        if (v > L_NUM_BUCKETS) {
+            v -= 2 * L_NUM_BUCKETS;
+            carry = 1;
+        }
+        if (v != 0) {
+            const uint neg = v < 0 ? 1u : 0u;
+            const uint slot = atomicAdd(tg_count[uint(abs(v)) - 1u], 1u);
+            itemsBuf.v[items_base + slot] = uint16_t((tid << 6) | (dd << 1) | neg);
+        }
+    }
+}

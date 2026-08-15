@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace mp_test {
+namespace vkp_test {
 
 struct Vector {
     std::string name;
@@ -84,4 +84,4 @@ inline bool parse_vector(const std::string &path, const std::string &name, Vecto
 // Loads every case in `dir` (a directory of <case-name>/data.yaml).
 std::vector<Vector> load_all(const std::string &dir);
 
-} // namespace mp_test
+} // namespace vkp_test

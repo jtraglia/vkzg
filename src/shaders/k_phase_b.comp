@@ -1,0 +1,50 @@
+// Phase B: out[a] = sum_e kappa[e] * u[a - e], the fused IFFT/truncate/FFT map.
+//
+// The taps and their signed digits are identical for every output -- only the
+// point index rotates -- so the bucket-sorted item list comes precomputed from
+// the host and no sorting happens here.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = L_NUM_BUCKETS, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t outAddr;
+    uint64_t ladderAddr;
+    uint64_t itemsAddr;
+    uint64_t offsetsAddr;
+    uint64_t permAddr;
+} pc;
+
+void main() {
+    U32Buf outBuf = U32Buf(pc.outAddr);
+    U32Buf ladderBuf = U32Buf(pc.ladderAddr);
+    U32Buf itemsBuf = U32Buf(pc.itemsAddr);
+    U32Buf offsetsBuf = U32Buf(pc.offsetsAddr);
+    U32Buf permBuf = U32Buf(pc.permAddr);
+
+    const uint tid = gl_LocalInvocationID.x;
+    const uint a = gl_WorkGroupID.x;
+    const uint b = gl_WorkGroupID.y;
+    // Same load-ordering trick as phase A, except the taps are fixed so the
+    // permutation is computed once on the host.
+    const uint bucket = permBuf.v[tid];
+    const uint lo = offsetsBuf.v[bucket];
+    const uint hi = offsetsBuf.v[bucket + 1u];
+    const uint lbase = b * L_CIRCULANT_SIZE * L_LADDER_POSITIONS * L_AFFINE_WORDS;
+
+    G1 acc = g1_identity();
+    for (uint it = lo; it < hi; it++) {
+        const uint packed = itemsBuf.v[it];
+        const uint e = packed & 0xffu;
+        const uint d = (packed >> 8) & 0xffu;
+        const uint sign = (packed >> 16) & 1u;
+        const uint src = (a - e) & (L_CIRCULANT_SIZE - 1u);
+        G1A pt = g1a_load(ladderBuf, lbase + (src * L_LADDER_POSITIONS + d) * L_AFFINE_WORDS);
+        if (sign != 0u) pt.y = fp_neg(pt.y);
+        acc = g1_madd(acc, pt);
+    }
+
+    g1_store(outBuf, (b * L_CIRCULANT_SIZE * L_NUM_BUCKETS + a * L_NUM_BUCKETS + bucket) * L_JACOBIAN_WORDS, acc);
+}

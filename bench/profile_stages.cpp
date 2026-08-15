@@ -1,7 +1,7 @@
 // Per-stage GPU timing (development tool).  Runs the real dispatch sequence
 // with the command buffer flushed at stage boundaries, so each figure includes
 // a little submission overhead but attributes time correctly.
-#include "../include/metal_prover.h"
+#include "../include/vulkan_prover.h"
 #include "../src/profile.h"
 
 #include <cstdio>
@@ -10,7 +10,7 @@
 
 static void fill_blob(uint8_t *blob, uint64_t seed) {
     uint64_t s = seed * 0x9E3779B97F4A7C15ull + 1;
-    for (int i = 0; i < MP_FIELD_ELEMENTS_PER_BLOB; i++) {
+    for (int i = 0; i < VKP_FIELD_ELEMENTS_PER_BLOB; i++) {
         uint8_t *fe = blob + (size_t)i * 32;
         for (int j = 0; j < 32; j++) { s ^= s << 13; s ^= s >> 7; s ^= s << 17; fe[j] = (uint8_t)(s >> 24); }
         fe[0] = 0;
@@ -21,22 +21,22 @@ int main(int argc, char **argv) {
     unsigned batch = argc > 1 ? (unsigned)atoi(argv[1]) : 8;
     int reps = argc > 2 ? atoi(argv[2]) : 6;
 
-    mp_options o;
-    mp_options_default(&o);
-    o.table_cache_path = "/tmp/mp_prover_tables_v3.cache";
+    vkp_options o;
+    vkp_options_default(&o);
+    o.table_cache_path = "/tmp/vkp_prover_tables_v3.cache";
     o.max_batch_size = batch;
-    mp_prover *p = nullptr;
-    if (mp_prover_new_default(&p, &o) != MP_OK) { printf("setup failed\n"); return 1; }
+    vkp_prover *p = nullptr;
+    if (vkp_prover_new_default(&p, &o) != VKP_OK) { printf("setup failed\n"); return 1; }
 
-    std::vector<uint8_t> blobs((size_t)batch * MP_BYTES_PER_BLOB);
-    for (unsigned i = 0; i < batch; i++) fill_blob(&blobs[(size_t)i * MP_BYTES_PER_BLOB], i + 1);
+    std::vector<uint8_t> blobs((size_t)batch * VKP_BYTES_PER_BLOB);
+    for (unsigned i = 0; i < batch; i++) fill_blob(&blobs[(size_t)i * VKP_BYTES_PER_BLOB], i + 1);
     std::vector<uint8_t> cells((size_t)batch * 128 * 2048), proofs((size_t)batch * 128 * 48);
 
-    mp::StageTimes best;
+    vkp::StageTimes best;
     bool first = true;
     for (int r = 0; r < reps; r++) {
-        mp::StageTimes t;
-        if (mp::profile_batch(p, cells.data(), proofs.data(), blobs.data(), batch, t) != MP_OK) {
+        vkp::StageTimes t;
+        if (vkp::profile_batch(p, cells.data(), proofs.data(), blobs.data(), batch, t) != VKP_OK) {
             printf("compute failed\n");
             return 1;
         }
@@ -62,6 +62,6 @@ int main(int argc, char **argv) {
     }
     printf("  %-24s %8.2f ms\n", "accounted", sum);
     printf("  %-24s %8.2f ms  (%.2f ms/blob)\n", "TOTAL (wall)", best.total, best.total / batch);
-    mp_prover_free(p);
+    vkp_prover_free(p);
     return 0;
 }

@@ -1,0 +1,90 @@
+// One pass of a four-step (N = N1 * N2) transform.  Each workgroup owns one
+// sub-transform, held in shared memory, so a 4096 or 8192 point transform
+// costs two dispatches instead of one per radix-2 stage.
+//
+// local_size_x is fixed at the larger of the two sub-transform sizes this
+// pipeline ever runs (128); when P.n is 64 the upper half of the workgroup
+// simply idles behind the existing `tid < P.n` guards below, and the shared
+// tile is sized for the 128 case regardless. barrier() calls are unconditional
+// (outside those guards) so every invocation in the workgroup still reaches
+// them uniformly.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t outAddr;
+    uint64_t inAddr;
+    uint64_t rootsAddr;
+    uint n;              // sub-transform size (<= 128)
+    uint log_n;
+    uint in_stride_t;    // element stride between transforms, input
+    uint in_stride_i;    // element stride within a transform, input
+    uint out_stride_t;
+    uint out_stride_i;
+    uint root_stride;    // 8192 / n, to index the shared root table
+    uint twiddle_stride; // 8192 / N for the inter-pass twiddle, or 0 for none
+    uint full_n;         // N
+    uint in_batch;       // elements per blob, input
+    uint out_batch;      // elements per blob, output
+    uint scale;          // non-zero to multiply the result by scale_val
+    uint scale_val[FR_NLIMBS];
+} pc;
+
+shared uint tile[L_CIRCULANT_SIZE * FR_NLIMBS];
+
+void main() {
+    U32Buf outBuf = U32Buf(pc.outAddr);
+    U32Buf inBuf = U32Buf(pc.inAddr);
+    U32Buf rootsBuf = U32Buf(pc.rootsAddr);
+
+    const uint tid = gl_LocalInvocationID.x;
+    const uint t = gl_WorkGroupID.x;
+    const uint b = gl_WorkGroupID.y;
+    const uint srcBase = b * pc.in_batch * FR_NLIMBS;
+    const uint dstBase = b * pc.out_batch * FR_NLIMBS;
+
+    if (tid < pc.n) {
+        const Fr v = fr_load(inBuf, srcBase + (t * pc.in_stride_t + tid * pc.in_stride_i) * FR_NLIMBS);
+        const uint j = brev(tid, pc.log_n);
+        for (int k = 0; k < FR_NLIMBS; k++) tile[j * FR_NLIMBS + k] = v.v[k];
+    }
+    barrier();
+
+    for (uint len = 2u; len <= pc.n; len <<= 1) {
+        const uint hlen = len >> 1;
+        const uint step = pc.n / len;
+        if (tid < (pc.n >> 1)) {
+            const uint blk = tid / hlen;
+            const uint j = tid - blk * hlen;
+            const uint base = blk * len;
+            const Fr w = fr_load(rootsBuf, (j * step * pc.root_stride) * FR_NLIMBS);
+            Fr a, c;
+            for (int k = 0; k < FR_NLIMBS; k++) a.v[k] = tile[(base + j) * FR_NLIMBS + k];
+            for (int k = 0; k < FR_NLIMBS; k++) c.v[k] = tile[(base + j + hlen) * FR_NLIMBS + k];
+            c = fr_mul(c, w);
+            const Fr s = fr_add(a, c);
+            const Fr d = fr_sub(a, c);
+            for (int k = 0; k < FR_NLIMBS; k++) tile[(base + j) * FR_NLIMBS + k] = s.v[k];
+            for (int k = 0; k < FR_NLIMBS; k++) tile[(base + j + hlen) * FR_NLIMBS + k] = d.v[k];
+        }
+        barrier();
+    }
+
+    if (tid < pc.n) {
+        Fr v;
+        for (int k = 0; k < FR_NLIMBS; k++) v.v[k] = tile[tid * FR_NLIMBS + k];
+        if (pc.twiddle_stride != 0u) {
+            const uint e = (t * tid) % pc.full_n;
+            v = fr_mul(v, fr_load(rootsBuf, (e * pc.twiddle_stride) * FR_NLIMBS));
+        }
+        if (pc.scale != 0u) {
+            Fr s;
+            for (int k = 0; k < FR_NLIMBS; k++) s.v[k] = pc.scale_val[k];
+            v = fr_mul(v, s);
+        }
+        fr_store(outBuf, dstBase + (t * pc.out_stride_t + tid * pc.out_stride_i) * FR_NLIMBS, v);
+    }
+}

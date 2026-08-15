@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-namespace mp {
+namespace vkp {
 namespace {
 
 void fr_from_device(Fr &out, const uint32_t *w) {
@@ -59,12 +59,12 @@ static void fr_ifft(Fr *data, size_t n, const SetupTables &tables) {
     for (size_t i = 0; i < n; i++) fr_mul(data[i], data[i], inv_n);
 }
 
-static mp_result blob_to_polynomial(Fr *poly, const uint8_t *blob, const SetupTables &tables) {
+static vkp_result blob_to_polynomial(Fr *poly, const uint8_t *blob, const SetupTables &tables) {
     // The blob holds Lagrange-basis evaluations in bit-reversed order.
     std::vector<Fr> lagrange(kFieldElementsPerBlob);
     for (int i = 0; i < kFieldElementsPerBlob; i++) {
         if (!fr_from_bytes(lagrange[i], blob + (size_t)i * kBytesPerFieldElement)) {
-            return MP_ERR_INVALID_BLOB;
+            return VKP_ERR_INVALID_BLOB;
         }
     }
     // Undo the bit-reversal, then transform to monomial form.
@@ -74,7 +74,7 @@ static mp_result blob_to_polynomial(Fr *poly, const uint8_t *blob, const SetupTa
     }
     fr_ifft(brp.data(), kFieldElementsPerBlob, tables);
     memcpy(poly, brp.data(), sizeof(Fr) * kFieldElementsPerBlob);
-    return MP_OK;
+    return VKP_OK;
 }
 
 static void build_circulant_coeffs(Fr coeffs[kCirculantSize][kPhaseATerms], const Fr *poly,
@@ -183,11 +183,11 @@ void phase_b_via_g1_ffts(G1 *out, const G1 *u, const SetupTables &tables) {
     memcpy(out, v.data(), sizeof(G1) * kCirculantSize);
 }
 
-mp_result reference_compute(const SetupTables &tables, const uint8_t *blob, uint8_t *cells,
+vkp_result reference_compute(const SetupTables &tables, const uint8_t *blob, uint8_t *cells,
                                uint8_t *proofs) {
     std::vector<Fr> poly(kFieldElementsPerBlob);
-    mp_result rc = blob_to_polynomial(poly.data(), blob, tables);
-    if (rc != MP_OK) return rc;
+    vkp_result rc = blob_to_polynomial(poly.data(), blob, tables);
+    if (rc != VKP_OK) return rc;
 
     if (cells) {
         std::vector<Fr> ext(kFieldElementsPerExtBlob);
@@ -220,7 +220,7 @@ mp_result reference_compute(const SetupTables &tables, const uint8_t *blob, uint
             g1_compress(proofs + (size_t)i * kBytesPerProof, aff[i]);
         }
     }
-    return MP_OK;
+    return VKP_OK;
 }
 
-} // namespace mp
+} // namespace vkp

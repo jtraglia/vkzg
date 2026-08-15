@@ -1,0 +1,28 @@
+// L[j][d] = 2^(8d) * u[j], the shared base set for phase B.
+//
+// This is 248 sequential doublings over 128 points per blob, so at small batch
+// sizes it is latency-bound rather than throughput-bound; batching is what
+// makes it cheap, since the parallelism is 128 * blobs.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = 8, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t ladderAddr;
+    uint64_t uAddr;
+} pc;
+
+void main() {
+    U32Buf ladderBuf = U32Buf(pc.ladderAddr);
+    U32Buf uBuf = U32Buf(pc.uAddr);
+
+    const uint j = gl_GlobalInvocationID.x;
+    const uint b = gl_GlobalInvocationID.y;
+    G1 acc = g1_load(uBuf, (b * L_CIRCULANT_SIZE + j) * L_JACOBIAN_WORDS);
+    for (uint d = 0u; d < L_LADDER_POSITIONS; d++) {
+        g1_store(ladderBuf, ((b * L_CIRCULANT_SIZE + j) * L_LADDER_POSITIONS + d) * L_JACOBIAN_WORDS, acc);
+        for (uint s = 0u; s < L_WINDOW_BITS; s++) acc = g1_dbl(acc);
+    }
+}

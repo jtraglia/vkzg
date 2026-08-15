@@ -1,0 +1,62 @@
+// Jacobian -> affine for `count` points, Montgomery's trick per chunk.
+// Points at infinity become (0, 0), which the accumulation kernels treat as
+// the identity.
+//
+// local_size_x is fixed at 64 regardless of how few threads a given dispatch
+// actually needs; the `lo >= P.count` guard below absorbs the padded tail
+// exactly the way it already absorbed a partial last workgroup, so no
+// per-dispatch local-size tuning is needed the way Metal allowed at encode
+// time.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t outAffineAddr;
+    uint64_t inJacobianAddr;
+    uint64_t scratchAddr;
+    uint count; // total points
+    uint chunk; // points per thread; one field inversion each
+} pc;
+
+void main() {
+    U32Buf outAffineBuf = U32Buf(pc.outAffineAddr);
+    U32Buf inJacobianBuf = U32Buf(pc.inJacobianAddr);
+    U32Buf scratchBuf = U32Buf(pc.scratchAddr);
+
+    const uint gid = gl_GlobalInvocationID.x;
+    const uint lo = gid * pc.chunk;
+    if (lo >= pc.count) return;
+    const uint hi = min(lo + pc.chunk, pc.count);
+
+    Fp acc = fp_one();
+    for (uint i = lo; i < hi; i++) {
+        const Fp z = fp_load(inJacobianBuf, i * L_JACOBIAN_WORDS + 2 * FP_NLIMBS);
+        fp_store(scratchBuf, i * FP_NLIMBS, acc);
+        if (!fp_is_zero(z)) acc = fp_mul(acc, z);
+    }
+    Fp inv = fp_inv(acc);
+
+    for (uint i = hi; i-- > lo;) {
+        const uint dst = i * L_AFFINE_WORDS;
+        const Fp z = fp_load(inJacobianBuf, i * L_JACOBIAN_WORDS + 2 * FP_NLIMBS);
+        if (fp_is_zero(z)) {
+            for (int k = 0; k < L_AFFINE_WORDS; k++) outAffineBuf.v[dst + k] = 0u;
+        } else {
+            const Fp pre = fp_load(scratchBuf, i * FP_NLIMBS);
+            const Fp zinv = fp_mul(pre, inv);
+            inv = fp_mul(inv, z);
+            const Fp z2 = fp_sqr(zinv);
+            const Fp z3 = fp_mul(z2, zinv);
+            const Fp x = fp_load(inJacobianBuf, i * L_JACOBIAN_WORDS);
+            const Fp y = fp_load(inJacobianBuf, i * L_JACOBIAN_WORDS + FP_NLIMBS);
+            const Fp xa = fp_mul(x, z2);
+            const Fp ya = fp_mul(y, z3);
+            fp_store(outAffineBuf, dst, xa);
+            fp_store(outAffineBuf, dst + FP_NLIMBS, ya);
+        }
+        if (i == lo) break;
+    }
+}

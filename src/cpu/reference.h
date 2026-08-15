@@ -11,11 +11,11 @@
 
 #include <vector>
 
-namespace mp {
+namespace vkp {
 
 
 // Full pipeline. `cells` and `proofs` may be null.
-mp_result reference_compute(const SetupTables &tables, const uint8_t *blob, uint8_t *cells,
+vkp_result reference_compute(const SetupTables &tables, const uint8_t *blob, uint8_t *cells,
                                uint8_t *proofs);
 void phase_b_circulant(G1 *out, const G1 *u, const SetupTables &tables);
 
@@ -25,4 +25,4 @@ void phase_b_circulant(G1 *out, const G1 *u, const SetupTables &tables);
 void phase_b_via_g1_ffts(G1 *out, const G1 *u, const SetupTables &tables);
 
 
-} // namespace mp
+} // namespace vkp

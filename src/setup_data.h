@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace mp {
+namespace vkp {
 
 /*
  * Monomial-form G1 trusted setup: 4096 compressed points, 48 bytes each.
@@ -20,4 +20,4 @@ namespace mp {
 constexpr size_t kEmbeddedSetupSize = 196608;
 extern const uint8_t kEmbeddedSetupG1Monomial[kEmbeddedSetupSize];
 
-} // namespace mp
+} // namespace vkp

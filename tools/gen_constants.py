@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the BLS12-381 constant tables used by the CPU and Metal code.
+"""Generate the BLS12-381 constant tables used by the CPU and GLSL shader code.
 
 Emitting these from one script keeps the 64-bit host limbs and the 32-bit
 device limbs provably consistent -- they are derived from the same integers.
@@ -157,43 +157,46 @@ def main():
     # ---------------------------------------------------------------- host
     h = [banner]
     h.append("/* Base field p (381 bits), 6 x 64-bit limbs, little endian. */\n")
-    h.append(f"#define MP_FP_P {{ {fmt(P, 6, 64)} }}\n")
-    h.append(f"#define MP_FP_N0 0x{n0(P, 64):016x}ULL\n")
-    h.append(f"#define MP_FP_R {{ {fmt(to_mont(1, P, 384), 6, 64)} }}\n")
-    h.append(f"#define MP_FP_R2 {{ {fmt(to_mont(to_mont(1, P, 384), P, 384), 6, 64)} }}\n")
+    h.append(f"#define VKP_FP_P {{ {fmt(P, 6, 64)} }}\n")
+    h.append(f"#define VKP_FP_N0 0x{n0(P, 64):016x}ULL\n")
+    h.append(f"#define VKP_FP_R {{ {fmt(to_mont(1, P, 384), 6, 64)} }}\n")
+    h.append(f"#define VKP_FP_R2 {{ {fmt(to_mont(to_mont(1, P, 384), P, 384), 6, 64)} }}\n")
     # (p - 3) / 4 : exponent for the square root used in point decompression
-    h.append(f"#define MP_FP_P_MINUS_3_DIV_4 {{ {fmt((P - 3) // 4, 6, 64)} }}\n")
-    h.append(f"#define MP_FP_P_MINUS_2 {{ {fmt(P - 2, 6, 64)} }}\n")
-    h.append(f"#define MP_FP_BETA {{ {fmt(to_mont(BETA, P, 384), 6, 64)} }}\n")
+    h.append(f"#define VKP_FP_P_MINUS_3_DIV_4 {{ {fmt((P - 3) // 4, 6, 64)} }}\n")
+    h.append(f"#define VKP_FP_P_MINUS_2 {{ {fmt(P - 2, 6, 64)} }}\n")
+    h.append(f"#define VKP_FP_BETA {{ {fmt(to_mont(BETA, P, 384), 6, 64)} }}\n")
     h.append("\n/* Scalar field r (255 bits), 4 x 64-bit limbs. */\n")
-    h.append(f"#define MP_FR_R_MOD {{ {fmt(R, 4, 64)} }}\n")
-    h.append(f"#define MP_FR_N0 0x{n0(R, 64):016x}ULL\n")
-    h.append(f"#define MP_FR_ONE {{ {fmt(to_mont(1, R, 256), 4, 64)} }}\n")
-    h.append(f"#define MP_FR_R2 {{ {fmt(to_mont(to_mont(1, R, 256), R, 256), 4, 64)} }}\n")
-    h.append(f"#define MP_FR_R_MINUS_2 {{ {fmt(R - 2, 4, 64)} }}\n")
-    h.append(f"#define MP_FR_ROOT_8192 {{ {fmt(to_mont(root8192, R, 256), 4, 64)} }}\n")
+    h.append(f"#define VKP_FR_R_MOD {{ {fmt(R, 4, 64)} }}\n")
+    h.append(f"#define VKP_FR_N0 0x{n0(R, 64):016x}ULL\n")
+    h.append(f"#define VKP_FR_ONE {{ {fmt(to_mont(1, R, 256), 4, 64)} }}\n")
+    h.append(f"#define VKP_FR_R2 {{ {fmt(to_mont(to_mont(1, R, 256), R, 256), 4, 64)} }}\n")
+    h.append(f"#define VKP_FR_R_MINUS_2 {{ {fmt(R - 2, 4, 64)} }}\n")
+    h.append(f"#define VKP_FR_ROOT_8192 {{ {fmt(to_mont(root8192, R, 256), 4, 64)} }}\n")
     # GLV split needs lambda as a plain integer (it is only ~128 bits) and r.
     h.append("\n/* GLV endomorphism, used by the subgroup check. */\n")
-    h.append(f"#define MP_GLV_LAMBDA_INT {{ {fmt(b1[0], 4, 64)} }}\n")
+    h.append(f"#define VKP_GLV_LAMBDA_INT {{ {fmt(b1[0], 4, 64)} }}\n")
     open(host_path, "w").write("".join(h))
 
     # -------------------------------------------------------------- device
+    def glsl_arr(x, nlimbs, width):
+        return f"uint[{nlimbs}]({fmt(x, nlimbs, width)})"
+
     d = [banner.replace("#pragma once\n\n", "")]
-    d.append("/* Device-side (Metal) constants: 32-bit limbs, little endian. */\n")
+    d.append("/* Device-side (GLSL) constants: 32-bit limbs, little endian. */\n")
     d.append("#define FP_NLIMBS 12\n#define FR_NLIMBS 8\n\n")
-    d.append(f"constant uint FP_P[12] = {{ {fmt(P, 12, 32)} }};\n")
-    d.append(f"constant uint FP_N0 = 0x{n0(P, 32):08x}u;\n")
-    d.append(f"constant uint FP_R[12] = {{ {fmt(to_mont(1, P, 384), 12, 32)} }};\n")
-    d.append(f"constant uint FP_R2[12] = {{ {fmt(to_mont(to_mont(1, P, 384), P, 384), 12, 32)} }};\n")
-    d.append(f"constant uint FP_BETA[12] = {{ {fmt(to_mont(BETA, P, 384), 12, 32)} }};\n")
+    d.append(f"const uint FP_P[12] = {glsl_arr(P, 12, 32)};\n")
+    d.append(f"const uint FP_N0 = 0x{n0(P, 32):08x}u;\n")
+    d.append(f"const uint FP_R[12] = {glsl_arr(to_mont(1, P, 384), 12, 32)};\n")
+    d.append(f"const uint FP_R2[12] = {glsl_arr(to_mont(to_mont(1, P, 384), P, 384), 12, 32)};\n")
+    d.append(f"const uint FP_BETA[12] = {glsl_arr(to_mont(BETA, P, 384), 12, 32)};\n")
     # Exponent for the Fermat inversion, and (p-1)/2 for the compressed-point
     # sign bit.  Both are plain integers, not Montgomery values.
-    d.append(f"constant uint FP_P_MINUS_2[12] = {{ {fmt(P - 2, 12, 32)} }};\n")
-    d.append(f"constant uint FP_P_HALF[12] = {{ {fmt((P - 1) // 2, 12, 32)} }};\n")
-    d.append(f"constant uint FR_P[8] = {{ {fmt(R, 8, 32)} }};\n")
-    d.append(f"constant uint FR_N0 = 0x{n0(R, 32):08x}u;\n")
-    d.append(f"constant uint FR_ONE[8] = {{ {fmt(to_mont(1, R, 256), 8, 32)} }};\n")
-    d.append(f"constant uint FR_R2[8] = {{ {fmt(to_mont(to_mont(1, R, 256), R, 256), 8, 32)} }};\n")
+    d.append(f"const uint FP_P_MINUS_2[12] = {glsl_arr(P - 2, 12, 32)};\n")
+    d.append(f"const uint FP_P_HALF[12] = {glsl_arr((P - 1) // 2, 12, 32)};\n")
+    d.append(f"const uint FR_P[8] = {glsl_arr(R, 8, 32)};\n")
+    d.append(f"const uint FR_N0 = 0x{n0(R, 32):08x}u;\n")
+    d.append(f"const uint FR_ONE[8] = {glsl_arr(to_mont(1, R, 256), 8, 32)};\n")
+    d.append(f"const uint FR_R2[8] = {glsl_arr(to_mont(to_mont(1, R, 256), R, 256), 8, 32)};\n")
     open(dev_path, "w").write("".join(d))
 
     # Sanity-check the split on pseudo-random scalars and report the worst case.

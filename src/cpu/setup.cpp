@@ -7,7 +7,7 @@
 #include <cstring>
 #include <thread>
 
-namespace mp {
+namespace vkp {
 namespace {
 
 // Convert host limbs to the device's 32-bit little-endian layout.
@@ -171,10 +171,10 @@ uint64_t compute_setup_digest(const uint8_t *g1_monomial_bytes, size_t len) {
 }
 
 
-mp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool validate,
+vkp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool validate,
                                 SetupTables &out) {
-    if (!g1_monomial_bytes || len != (size_t)MP_NUM_SETUP_G1_POINTS * MP_BYTES_PER_G1) {
-        return MP_ERR_BADARGS;
+    if (!g1_monomial_bytes || len != (size_t)VKP_NUM_SETUP_G1_POINTS * VKP_BYTES_PER_G1) {
+        return VKP_ERR_BADARGS;
     }
     out.setup_digest = compute_setup_digest(g1_monomial_bytes, len);
 
@@ -183,13 +183,13 @@ mp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool 
     std::vector<uint8_t> ok(kFieldElementsPerBlob, 0);
     parallel_for(kFieldElementsPerBlob, [&](size_t i) {
         G1Affine a;
-        if (!g1_decompress(a, g1_monomial_bytes + i * MP_BYTES_PER_G1)) return;
+        if (!g1_decompress(a, g1_monomial_bytes + i * VKP_BYTES_PER_G1)) return;
         if (validate && !(g1_affine_is_on_curve(a) && g1_affine_in_subgroup(a))) return;
         setup_affine[i] = a;
         ok[i] = 1;
     });
     for (int i = 0; i < kFieldElementsPerBlob; i++) {
-        if (!ok[i]) return MP_ERR_SETUP;
+        if (!ok[i]) return VKP_ERR_SETUP;
     }
 
     // ---------------------------------------------------------- roots of unity
@@ -200,7 +200,7 @@ mp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool 
         fr_root_of_unity(w, 13);
         roots[0] = kFrOne;
         for (int i = 1; i <= kFieldElementsPerExtBlob; i++) fr_mul(roots[i], roots[i - 1], w);
-        if (!fr_eq(roots[kFieldElementsPerExtBlob], kFrOne)) return MP_ERR_SETUP;
+        if (!fr_eq(roots[kFieldElementsPerExtBlob], kFrOne)) return VKP_ERR_SETUP;
         for (int i = 0; i <= kFieldElementsPerExtBlob; i++) {
             roots_inv[i] = roots[kFieldElementsPerExtBlob - i];
         }
@@ -286,7 +286,7 @@ mp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool 
             }
             tap++;
         }
-        if (tap != kPhaseBTerms) return MP_ERR_SETUP;
+        if (tap != kPhaseBTerms) return VKP_ERR_SETUP;
 
         std::stable_sort(items.begin(), items.end(),
                          [](const Item &a, const Item &b) { return a.bucket < b.bucket; });
@@ -312,7 +312,7 @@ mp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool 
         out.kernel_perm = order;
     }
 
-    return MP_OK;
+    return VKP_OK;
 }
 
 // ------------------------------------------------------------------- cache
@@ -333,11 +333,11 @@ bool read_exact(FILE *f, void *p, size_t n) { return fread(p, 1, n, f) == n; }
 bool write_exact(FILE *f, const void *p, size_t n) { return fwrite(p, 1, n, f) == n; }
 } // namespace
 
-mp_result load_table_cache(const std::string &path, uint64_t expected_digest, SetupTables &out) {
+vkp_result load_table_cache(const std::string &path, uint64_t expected_digest, SetupTables &out) {
     FILE *f = fopen(path.c_str(), "rb");
-    if (!f) return MP_ERR_IO;
+    if (!f) return VKP_ERR_IO;
     CacheHeader h{};
-    mp_result rc = MP_ERR_IO;
+    vkp_result rc = VKP_ERR_IO;
     if (!read_exact(f, &h, sizeof(h))) goto done;
     if (h.magic != kTableCacheMagic || h.version != kTableCacheVersion ||
         h.setup_digest != expected_digest || h.position_words != kPositionTableWords) {
@@ -359,16 +359,16 @@ mp_result load_table_cache(const std::string &path, uint64_t expected_digest, Se
         !read_exact(f, out.inv_blob, sizeof(out.inv_blob))) {
         goto done;
     }
-    rc = MP_OK;
+    rc = VKP_OK;
 done:
     fclose(f);
     return rc;
 }
 
-mp_result save_table_cache(const std::string &path, const SetupTables &in) {
+vkp_result save_table_cache(const std::string &path, const SetupTables &in) {
     const std::string tmp = path + ".tmp";
     FILE *f = fopen(tmp.c_str(), "wb");
-    if (!f) return MP_ERR_IO;
+    if (!f) return VKP_ERR_IO;
     CacheHeader h{};
     h.magic = kTableCacheMagic;
     h.version = kTableCacheVersion;
@@ -389,13 +389,13 @@ mp_result save_table_cache(const std::string &path, const SetupTables &in) {
     fclose(f);
     if (!ok) {
         remove(tmp.c_str());
-        return MP_ERR_IO;
+        return VKP_ERR_IO;
     }
     if (rename(tmp.c_str(), path.c_str()) != 0) {
         remove(tmp.c_str());
-        return MP_ERR_IO;
+        return VKP_ERR_IO;
     }
-    return MP_OK;
+    return VKP_OK;
 }
 
-} // namespace mp
+} // namespace vkp

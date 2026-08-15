@@ -1,7 +1,6 @@
 build/
 *.o
 *.a
-*.dylib
-.DS_Store
+*.so
 compile_commands.json
-*.kzgpucache
+*.cache

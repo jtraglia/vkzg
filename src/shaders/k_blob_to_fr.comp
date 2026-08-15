@@ -1,0 +1,38 @@
+// blob bytes -> bit-reversed Lagrange values.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t outAddr;
+    uint64_t blobAddr;
+    uint64_t errAddr;
+} pc;
+
+void main() {
+    U32Buf outBuf = U32Buf(pc.outAddr);
+    U8Buf blobBuf = U8Buf(pc.blobAddr);
+    U32Buf errBuf = U32Buf(pc.errAddr);
+
+    const uint i = gl_GlobalInvocationID.x;
+    const uint b = gl_GlobalInvocationID.y;
+    const uint srcBase = b * L_BYTES_PER_BLOB + i * 32u;
+
+    // 32 big-endian bytes -> 8 little-endian 32-bit limbs.
+    Fr v;
+    for (int limb = 0; limb < FR_NLIMBS; limb++) {
+        const uint off = uint(7 - limb) * 4u;
+        v.v[limb] = (uint(blobBuf.v[srcBase + off]) << 24) | (uint(blobBuf.v[srcBase + off + 1]) << 16) |
+                    (uint(blobBuf.v[srcBase + off + 2]) << 8) | uint(blobBuf.v[srcBase + off + 3]);
+    }
+    if (!fr_is_canonical(v)) {
+        atomicOr(errBuf.v[0], 1u);
+    }
+    const Fr m = fr_from_canonical(v);
+    // The blob holds evaluations in bit-reversed order; undo that here so the
+    // inverse transform sees natural order.
+    const uint dst = brev(i, L_LOG_BLOB);
+    fr_store(outBuf, (b * L_FIELD_ELEMENTS_PER_BLOB + dst) * FR_NLIMBS, m);
+}
