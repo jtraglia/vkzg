@@ -5,6 +5,8 @@
 // on this GPU, versus ~40us for a threaded batch inversion on the idle CPU.
 #pragma once
 
+#include "cpu_msm.h"
+
 #include <cstddef>
 #include <cstdint>
 
@@ -25,11 +27,12 @@ void jacobian_to_affine_device(uint32_t *out_affine, const uint32_t *in_jacobian
 // which is the worst case for a GPU whose single-thread Fp multiply latency is
 // 3.4us and best case for a CPU core.  On the GPU it measured 19.6ms; here it
 // is well under a millisecond across the idle cores.
-void build_ladder_affine(uint32_t *out_affine, const uint32_t *u_jacobian, size_t num_points,
-                         unsigned threads);
+void build_ladder_affine(ThreadPool *pool, uint32_t *out_affine, const uint32_t *u_jacobian,
+                         size_t num_points, unsigned threads);
 
 // Applies the bit-reversal permutation over each blob's 128 proofs, converts to
 // affine, and writes the 48-byte compressed encoding.
-void finalize_proofs(uint8_t *out, const uint32_t *jacobian, size_t num_blobs, unsigned threads);
+void finalize_proofs(ThreadPool *pool, uint8_t *out, const uint32_t *jacobian, size_t num_blobs,
+                     unsigned threads);
 
 } // namespace kzgpu

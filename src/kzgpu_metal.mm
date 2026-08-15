@@ -528,7 +528,7 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
         // and the inversion run on the host: 248 sequential doublings over 128
         // points is latency-bound on a GPU whose single-thread Fp multiply
         // costs 3.4us (measured 19.6ms there, well under 1ms here).
-        build_ladder_affine((uint32_t *)p->bufLadderAff.contents,
+        build_ladder_affine(p->pool.get(), (uint32_t *)p->bufLadderAff.contents,
                             (const uint32_t *)p->bufPoints.contents,
                             (size_t)batch * kCirculantSize, 0);
 
@@ -576,7 +576,7 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
                       p->cpuCostB);
         }
 
-        finalize_proofs(proofs, (const uint32_t *)p->bufProofs.contents, batch, 0);
+        finalize_proofs(p->pool.get(), proofs, (const uint32_t *)p->bufProofs.contents, batch, 0);
         return KZGPU_OK;
     }
 }
@@ -712,7 +712,7 @@ kzgpu_result profile_batch(kzgpu_prover *p, unsigned char *cells, unsigned char 
                     threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
             });
             double a = nowMs();
-            build_ladder_affine((uint32_t *)p->bufLadderAff.contents,
+            build_ladder_affine(p->pool.get(), (uint32_t *)p->bufLadderAff.contents,
                                 (const uint32_t *)p->bufPoints.contents,
                                 (size_t)batch * kCirculantSize, 0);
             out.ladder = nowMs() - a;
@@ -737,7 +737,7 @@ kzgpu_result profile_batch(kzgpu_prover *p, unsigned char *cells, unsigned char 
             });
 
             a = nowMs();
-            finalize_proofs(proofs, (const uint32_t *)p->bufProofs.contents, batch, 0);
+            finalize_proofs(p->pool.get(), proofs, (const uint32_t *)p->bufProofs.contents, batch, 0);
             out.finalize = nowMs() - a;
         }
         out.total = nowMs() - t_begin;
