@@ -41,14 +41,34 @@
 
 /*
  * Bucket reduction: L_REDUCE_LANES lanes cooperate on one output, each first
- * collapsing L_NUM_BUCKETS / L_REDUCE_LANES buckets serially, then a shuffle
- * tree across the lanes.
+ * collapsing L_NUM_BUCKETS / L_REDUCE_LANES buckets serially, then a subgroup
+ * shuffle tree across the lanes. At L_REDUCE_LANES == 1 the tree is empty and
+ * every thread reduces all 128 buckets on its own, with no shuffles at all --
+ * that also means fewer, fatter output-carrying threads per dispatch, which
+ * matters below.
  *
- * Fewer lanes wins once there are enough threads to fill the GPU, because the
- * tree executes at full SIMD width on every level however few lanes are
- * actually merging.  Measured at batch 64, interleaved to cancel thermal
- * drift: 4 lanes 46.1 ms/blob, 8 lanes 48.0, 16 lanes 53.4, 32 lanes 71.8.
- * Below 4 the serial chain starts to dominate (2 lanes 48.3, 1 lane 49.6).
+ * Metal (Apple GPU, `simd_shuffle_down`) measured 4 lanes as the optimum at
+ * batch 64: 4 lanes 46.1 ms/blob, 8 lanes 48.0, 16 lanes 53.4, 32 lanes 71.8,
+ * 2 lanes 48.3, 1 lane 49.6 -- cooperation paying for itself down to 2 lanes,
+ * only backfiring once you go all the way to 1.
+ *
+ * On this Vulkan/Honeykrisp driver (`subgroupShuffleDown`) fewer lanes is
+ * better at large batch but *worse* at small batch, because L_REDUCE_LANES
+ * also sets how many threads a reduce dispatch launches (batch * 128 /
+ * L_REDUCE_LANES): fewer lanes means fewer, fatter threads, and at small
+ * batch that's not enough threads to hide the GPU's latency, cooperation or
+ * not. Full sweep, ms/blob:
+ *
+ *   lanes   batch 1   batch 8   batch 16   batch 32   batch 64
+ *       1     174.2      69.2       60.4       60.7       58.5
+ *       2     140.1      63.0       61.3       59.4       59.0
+ *       4     120.1      64.7       60.6       60.5       59.5
+ *
+ * 4 lanes is kept: it is the only setting that doesn't regress the batch >= 8
+ * range this library recommends (see the README's Batching section) to chase
+ * a ~1.7% win that only shows up at batch 64, and it is dramatically better
+ * at batch 1. Worth revisiting if the recommended batch range changes, or on
+ * a different Vulkan implementation.
  */
 #define L_LOAD_CLASSES 64 /* counting-sort bins for the bucket load ordering */
 

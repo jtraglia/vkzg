@@ -49,7 +49,7 @@ void main() {
     if (tid < pc.n) {
         const Fr v = fr_load(inBuf, srcBase + (t * pc.in_stride_t + tid * pc.in_stride_i) * FR_NLIMBS);
         const uint j = brev(tid, pc.log_n);
-        for (int k = 0; k < FR_NLIMBS; k++) tile[j * FR_NLIMBS + k] = v.v[k];
+        [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) tile[j * FR_NLIMBS + k] = v.v[k];
     }
     barrier();
 
@@ -62,27 +62,27 @@ void main() {
             const uint base = blk * len;
             const Fr w = fr_load(rootsBuf, (j * step * pc.root_stride) * FR_NLIMBS);
             Fr a, c;
-            for (int k = 0; k < FR_NLIMBS; k++) a.v[k] = tile[(base + j) * FR_NLIMBS + k];
-            for (int k = 0; k < FR_NLIMBS; k++) c.v[k] = tile[(base + j + hlen) * FR_NLIMBS + k];
+            [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) a.v[k] = tile[(base + j) * FR_NLIMBS + k];
+            [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) c.v[k] = tile[(base + j + hlen) * FR_NLIMBS + k];
             c = fr_mul(c, w);
             const Fr s = fr_add(a, c);
             const Fr d = fr_sub(a, c);
-            for (int k = 0; k < FR_NLIMBS; k++) tile[(base + j) * FR_NLIMBS + k] = s.v[k];
-            for (int k = 0; k < FR_NLIMBS; k++) tile[(base + j + hlen) * FR_NLIMBS + k] = d.v[k];
+            [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) tile[(base + j) * FR_NLIMBS + k] = s.v[k];
+            [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) tile[(base + j + hlen) * FR_NLIMBS + k] = d.v[k];
         }
         barrier();
     }
 
     if (tid < pc.n) {
         Fr v;
-        for (int k = 0; k < FR_NLIMBS; k++) v.v[k] = tile[tid * FR_NLIMBS + k];
+        [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) v.v[k] = tile[tid * FR_NLIMBS + k];
         if (pc.twiddle_stride != 0u) {
             const uint e = (t * tid) % pc.full_n;
             v = fr_mul(v, fr_load(rootsBuf, (e * pc.twiddle_stride) * FR_NLIMBS));
         }
         if (pc.scale != 0u) {
             Fr s;
-            for (int k = 0; k < FR_NLIMBS; k++) s.v[k] = pc.scale_val[k];
+            [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) s.v[k] = pc.scale_val[k];
             v = fr_mul(v, s);
         }
         fr_store(outBuf, dstBase + (t * pc.out_stride_t + tid * pc.out_stride_i) * FR_NLIMBS, v);

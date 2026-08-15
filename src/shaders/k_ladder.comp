@@ -3,11 +3,20 @@
 // This is 248 sequential doublings over 128 points per blob, so at small batch
 // sizes it is latency-bound rather than throughput-bound; batching is what
 // makes it cheap, since the parallelism is 128 * blobs.
+//
+// local_size_x is 128 (one workgroup covers every point of one blob) rather
+// than the 8 the Metal original used: each thread's chain is fully
+// independent (no shared memory, no barriers), so workgroup size is pure
+// scheduling and doesn't touch correctness. On this driver 8-wide workgroups
+// measured ~369ms of a 3.5s batch-64 call; widening to 64 or 128 (same
+// result either way) dropped that to ~98ms -- a real win, not a rounding
+// error, most likely from filling out the 32-wide subgroup instead of
+// leaving 3/4 of it idle every dispatch.
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #include "field.glsl.inc"
 
-layout(local_size_x = 8, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant, std430) uniform PC {
     uint64_t ladderAddr;
@@ -23,6 +32,6 @@ void main() {
     G1 acc = g1_load(uBuf, (b * L_CIRCULANT_SIZE + j) * L_JACOBIAN_WORDS);
     for (uint d = 0u; d < L_LADDER_POSITIONS; d++) {
         g1_store(ladderBuf, ((b * L_CIRCULANT_SIZE + j) * L_LADDER_POSITIONS + d) * L_JACOBIAN_WORDS, acc);
-        for (uint s = 0u; s < L_WINDOW_BITS; s++) acc = g1_dbl(acc);
+        [[unroll]] for (uint s = 0u; s < L_WINDOW_BITS; s++) acc = g1_dbl(acc);
     }
 }

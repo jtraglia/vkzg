@@ -50,7 +50,7 @@ void main() {
     Fr scalar = fr_load(coeffsBuf, (b * L_CIRCULANT_SIZE * L_PHASE_A_TERMS + j * L_PHASE_A_TERMS + tid) * FR_NLIMBS);
     scalar = fr_to_canonical(scalar);
     int carry = 0;
-    for (uint dd = 0u; dd < L_NUM_DIGITS; dd++) {
+    [[unroll]] for (uint dd = 0u; dd < L_NUM_DIGITS; dd++) {
         const uint byte = (scalar.v[dd >> 2] >> ((dd & 3u) * 8u)) & 0xffu;
         int v = int(byte) + carry;
         carry = 0;
@@ -98,7 +98,7 @@ void main() {
 
     // Scatter into bucket order; tg_count is now a per-bucket write cursor.
     carry = 0;
-    for (uint dd = 0u; dd < L_NUM_DIGITS; dd++) {
+    [[unroll]] for (uint dd = 0u; dd < L_NUM_DIGITS; dd++) {
         const uint byte = (scalar.v[dd >> 2] >> ((dd & 3u) * 8u)) & 0xffu;
         int v = int(byte) + carry;
         carry = 0;

@@ -22,7 +22,7 @@ void main() {
 
     // 32 big-endian bytes -> 8 little-endian 32-bit limbs.
     Fr v;
-    for (int limb = 0; limb < FR_NLIMBS; limb++) {
+    [[unroll]] for (int limb = 0; limb < FR_NLIMBS; limb++) {
         const uint off = uint(7 - limb) * 4u;
         v.v[limb] = (uint(blobBuf.v[srcBase + off]) << 24) | (uint(blobBuf.v[srcBase + off + 1]) << 16) |
                     (uint(blobBuf.v[srcBase + off + 2]) << 8) | uint(blobBuf.v[srcBase + off + 3]);

@@ -36,14 +36,16 @@ Apple M1, 8 GPU cores, Fedora Asahi Remix, Mesa 26.1.6 (Honeykrisp):
 
 | | ms/blob | blobs/s |
 |---|---|---|
-| batch 1 | 110.6 | 9.0 |
-| batch 8 | 63.5 | 15.8 |
-| batch 16 | 61.0 | 16.4 |
-| batch 32 | 60.5 | 16.5 |
-| **batch 64** | **59.7** | **16.8** |
+| batch 1 | 120.2 | 8.3 |
+| batch 8 | 60.4 | 16.5 |
+| batch 16 | 56.4 | 17.7 |
+| batch 32 | 56.3 | 17.8 |
+| **batch 64** | **55.3** | **18.1** |
 
 An Apple M1 Ultra (64 GPU cores), same driver stack, on the same real
-hardware — not extrapolated:
+hardware — not extrapolated, but measured before the tuning pass below, so
+treat it as a shape (how it scales with core count) rather than a number
+that's still current:
 
 | | ms/blob | blobs/s |
 |---|---|---|
@@ -53,30 +55,29 @@ hardware — not extrapolated:
 | batch 32 | 12.3 | 81.1 |
 | **batch 64** | **11.9** | **83.9** |
 
-8× the GPU cores buys ~5× the throughput at batch 64 (60→12 ms/blob), not
+8× the GPU cores buys ~5× the throughput at batch 64 (55→12 ms/blob), not
 8×: some stages (the ladder, the batched inversions) are latency-bound
 rather than throughput-bound, so they don't scale with core count the way
 the two MSM phases do — see [How it works](#how-it-works-and-why-it-looks-like-this).
 It also means small batches leave far more of a 64-core part idle: batch 1
-is 10× slower per blob than batch 64 on the Ultra, versus under 2× on the
-8-core M1.
+is 10× slower per blob than batch 64 on the Ultra, versus under 1.5× on the
+8-core M1 after the tuning pass below (it was closer to 2× before).
 
 **Neither number is the Metal number for the same silicon**, and they aren't
 directly comparable: the old `metal-prover` measured 46.8 ms/blob (21.4
-blobs/s) at batch 64 on the 8-core M1 through Metal. Some of the gap is a
-Vulkan tax that's inherent to this design (a `vkCmdPipelineBarrier` after
-every dispatch, where Metal's single-encoder hazard tracking inserted
-narrower barriers automatically), and some of it is very likely tuning that
-carried over unexamined from the Metal version rather than being re-derived
-for this driver — see [Checking the tuning](#checking-the-tuning-on-your-own-gpu)
-below.
+blobs/s) at batch 64 on the 8-core M1 through Metal. Some of the remaining
+gap is a genuine Vulkan tax (a `vkCmdPipelineBarrier` after every dispatch,
+where Metal's single-encoder hazard tracking inserted narrower barriers
+automatically); most of what looked like a much bigger gap earlier turned
+out to be a measurement bug, not a real cost — see
+[Checking the tuning](#checking-the-tuning-on-your-own-gpu).
 
 ### Batching
 
 Batch at least 8. Two stages need it: the doubling ladder is 128 independent
 chains per blob (128 × batch threads), and the batched inversions amortise a
 multi-millisecond field inversion across their chunk. Below batch 8 both are
-latency-bound and you pay for it — batch 1 costs nearly 2× batch 64's
+latency-bound and you pay for it — batch 1 costs over 2× batch 64's
 per-blob time.
 
 Working set is **5.6 MiB per blob** plus a fixed ~28 MiB (the 24 MiB FK20
@@ -261,41 +262,78 @@ Metal) does not track buffer hazards automatically.
 
 ## Checking the tuning on your own GPU
 
-The Metal version's tuning notes above have not been re-validated for
-Vulkan/Honeykrisp, and this is the only GPU it's been tested on at all. Two
-tools:
+The Metal version's tuning notes above have not been fully re-validated for
+Vulkan/Honeykrisp, and this is the only GPU this has been tested on at all.
+Two tools:
 
 ```sh
 ./build/bench 10 128          # batch sweep, blobs/s
-./build/profile_stages 64 6   # per-stage GPU breakdown, via timestamp queries
+./build/profile_stages 64 6   # per-stage breakdown, CPU-flushed between stages
 ```
 
-On this M1 via Vulkan, the per-stage shape at batch 64 looks different from
-what the Metal build reported (phase A + phase B ~70% there): here, phase A
-is ~43% and `normalize ladder` is ~37%, with `reduce A` also a larger share
-than expected. That's a strong hint that at least one of the knobs below
-wants re-tuning for this backend rather than inheriting the Metal-tuned
-values — this hasn't been investigated yet:
+**A word of warning if you touch `profile_stages`'s internals: don't switch
+it back to GPU timestamp queries (`vkCmdWriteTimestamp` + `VkQueryPool`)
+without independently cross-checking the numbers.** That was the first
+implementation here, and it looked entirely plausible — consistent-seeming
+numbers that added up to the measured wall time — while being wrong. It
+reported `normalize ladder` at ~37% of a batch-64 call regardless of how
+much work that dispatch actually had (changing its thread count 4× moved
+nothing), and which *other* stage's name absorbed the real cost changed
+between otherwise-identical runs. Forcing an actual CPU-side drain
+(`vkQueueSubmit` + `vkWaitForFences`) between every dispatch and comparing
+gave a stable, reproducible breakdown instead — that's what `profile_stages`
+does now, at the cost of real submission overhead (~0.1ms/stage) it's
+honest about paying. The lesson: on a driver this young, a timestamp-based
+profiler is worth distrusting until you've checked it against a slower but
+unambiguous method at least once.
 
-- **`normalize ladder` (or `normalize proofs`) growing** means the inversion
-  chunking is off for this core count; `inversionChunk`'s target thread count
-  in `src/vulkan_prover.cpp` is the knob. Unlike Metal, `k_normalize.comp`'s
-  workgroup size is fixed at compile time (64) rather than chosen per
-  dispatch, since Vulkan doesn't allow a pipeline's local size to vary at
-  dispatch time — that fixed-size tradeoff is a candidate explanation worth
-  checking before assuming it's purely the chunk-size math.
-- **`ladder` growing as a share** means the batch is too small: it is 128
-  independent chains per blob, so it needs `batch × 128` to reach saturation.
-  Raise the batch before anything else.
-- **`reduce A`/`reduce B` growing** points at `L_REDUCE_LANES` in
-  `src/layout_defs.h` (4 here): more lanes give more threads at the cost of
-  wasted subgroup width in the tree.
+With that fixed, the real breakdown at batch 64 on this M1 is phase A ~39%,
+phase B ~40%, `reduce A`/`reduce B` ~16% combined, the ladder ~3%, and
+everything else under 2% — phase A and phase B (the two bucket MSMs)
+dominating, as the Metal design expects. Two concrete things came out of
+chasing the (real) remaining gap to Metal's numbers:
+
+- **The ladder's workgroups were needlessly small.** `k_ladder.comp` used a
+  workgroup of 8 threads, matching the Metal original — reasonable there, but
+  on this driver it left 3/4 of every 32-wide subgroup idle on every
+  dispatch. Each thread's doubling chain is fully independent (no shared
+  memory, no barriers), so nothing stops widening the workgroup; going to 64
+  or 128 (same result either way) cut the ladder's share of a batch-64 call
+  from ~369ms to ~98ms — a real ~7% win on total throughput, not a rounding
+  error. Worth checking on any kernel whose workgroup size was chosen for a
+  32-wide Metal simdgroup without re-examining whether it still makes sense here.
+- **`L_REDUCE_LANES` inverts, but isn't a clean win.** Metal's sweep found 4
+  lanes optimal, with subgroup-shuffle cooperation still profitable at 2 and
+  only breaking even at 1. On this driver, cooperation *never* profits at
+  large batch (1 lane beats 4 at batch 64, and the trend is monotonic all the
+  way down) — plausible if `subgroupShuffleDown` is simply more expensive
+  relative to plain ALU work on this younger shader compiler than on Metal's.
+  But fewer lanes also means fewer, fatter threads per reduce dispatch
+  (`batch * 128 / L_REDUCE_LANES` total), and at small batch that's not
+  enough threads to hide latency: 1 lane is ~45% *slower* than 4 at batch 1.
+  `L_REDUCE_LANES` stays at 4 because it's the only setting that doesn't
+  regress the batch ≥ 8 range this library recommends; revisit if that
+  recommendation changes, or on a different Vulkan implementation. Full sweep
+  in the comment above `L_REDUCE_LANES` in `src/layout_defs.h`.
+
+Still open, in roughly the order worth checking next:
+
+- **`inversionChunk`'s target thread count** (in `src/vulkan_prover.cpp`) was
+  chosen to match Metal's occupancy shape and hasn't been independently
+  re-swept on this driver, even though `normalize_ladder`/`normalize_proofs`
+  turned out to be cheap here (~1% combined) so it's a low-priority check.
 - **The pipeline barrier after every dispatch** (`barrier()` in
-  `src/vulkan_prover.cpp`) is deliberately conservative — a full
-  read/write memory barrier on every stage boundary, rather than the minimal
-  set Metal's automatic hazard tracking would have inferred. Narrowing these
-  to only the buffers each stage actually depends on is unexplored and could
-  recover some of the gap to the Metal numbers.
+  `src/vulkan_prover.cpp`) is deliberately conservative — a full read/write
+  memory barrier on every stage boundary, rather than the minimal set
+  Metal's automatic hazard tracking would have inferred. Narrowing these to
+  only the buffers each stage actually depends on is unexplored.
+- **Other kernels' workgroup sizes** (`k_phase_a_sort.comp` at 64,
+  `k_build_circulant.comp`/`k_phase_a.comp`/`k_phase_b.comp`/
+  `k_bucket_reduce.comp` at 128) inherited Metal's threadgroup sizes the same
+  way the ladder did; only the ladder has been checked for the same
+  small-workgroup effect so far, and it's the one with by far the smallest
+  original size (8) so the others may simply not have room to improve the
+  same way.
 
 The MSM window (`L_WINDOW_BITS`, 8) sets the whole shape — digits, buckets and
 the 24 MiB table — and was optimal by a clear margin on Metal; it is a
@@ -338,10 +376,13 @@ cannot drift.
 
 ## Limits and what would move next
 
-- **Vulkan-specific tuning is unstarted** — see
-  [Checking the tuning](#checking-the-tuning-on-your-own-gpu). The gap between
-  the 60.1 ms/blob measured here and the Metal build's 46.8 ms/blob on the
-  same silicon is the most immediately actionable thing in this repository.
+- **Vulkan-specific tuning is partially done** — see
+  [Checking the tuning](#checking-the-tuning-on-your-own-gpu) for what's been
+  checked (the profiler itself, the ladder's workgroup size, `L_REDUCE_LANES`)
+  and what's still open (`inversionChunk`, the per-dispatch barriers, other
+  kernels' workgroup sizes). The remaining gap between the 55.3 ms/blob
+  measured here and the Metal build's 46.8 ms/blob on the same silicon is the
+  most immediately actionable thing left in this repository.
 - **Phase B's tap count** can drop from 65 to ~43 by recursively splitting the
   cyclic convolution (`X¹²⁸−1 = (X⁶⁴−1)(X⁶⁴+1)`), which costs only additions in
   the ladder domain. Not implemented.

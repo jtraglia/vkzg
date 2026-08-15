@@ -84,8 +84,6 @@ struct vkp_prover {
     VkCommandPool cmdPool = VK_NULL_HANDLE;
     VkCommandBuffer cmdBuf = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
-    VkQueryPool queryPool = VK_NULL_HANDLE;
-    double timestampPeriodNs = 1.0;
 
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline psoBlobToFr = VK_NULL_HANDLE;
@@ -273,7 +271,6 @@ vkp_prover::~vkp_prover() {
         if (pso) vkDestroyPipeline(device, pso, nullptr);
     }
     if (pipelineLayout) vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-    if (queryPool) vkDestroyQueryPool(device, queryPool, nullptr);
     if (fence) vkDestroyFence(device, fence, nullptr);
     if (cmdPool) vkDestroyCommandPool(device, cmdPool, nullptr);
     vkDestroyDevice(device, nullptr);
@@ -444,7 +441,6 @@ vkp_result createProver(vkp_prover **out, SetupTables &tables, const vkp_options
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(p->physDev, &props);
     p->deviceName = props.deviceName;
-    p->timestampPeriodNs = props.limits.timestampPeriod;
 
     const float queuePriority = 1.0f;
     VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -492,15 +488,6 @@ vkp_result createProver(vkp_prover **out, SetupTables &tables, const vkp_options
 
     VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     if (vkCreateFence(p->device, &fenceInfo, nullptr, &p->fence) != VK_SUCCESS) {
-        delete p;
-        return VKP_ERR_GPU;
-    }
-
-    // 10 timestamps bracket the 9 profiled stages (see computeBatch).
-    VkQueryPoolCreateInfo queryInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-    queryInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-    queryInfo.queryCount = 10;
-    if (vkCreateQueryPool(p->device, &queryInfo, nullptr, &p->queryPool) != VK_SUCCESS) {
         delete p;
         return VKP_ERR_GPU;
     }
@@ -681,11 +668,42 @@ void recordNormalize(VkCommandBuffer cmd, vkp_prover *p, const VkBuf &outAffine,
     dispatch(cmd, p->psoNormalize, p->pipelineLayout, pc, groups, 1);
 }
 
-double readStamp(vkp_prover *p, uint32_t idx, const uint64_t *stamps) {
-    return (double)(stamps[idx]) * p->timestampPeriodNs / 1e6;
+// Ends, submits and waits on `cmd`, then reopens it for further recording.
+// Used only when profiling: it turns one command buffer into N synchronous
+// round-trips, so it costs real submission overhead (~0.1ms/flush) and must
+// never run on the production path.
+//
+// This replaced an earlier attempt at profiling via vkCmdWriteTimestamp +
+// VkQueryPool, which looked reasonable but produced numbers that didn't add
+// up: the "normalize ladder" bucket consistently read ~1.4s regardless of
+// how much (or how little) work that dispatch actually had to do, while
+// varying wildly between otherwise-identical runs which *other* bucket
+// absorbed the real cost. Forcing a CPU-side drain between every dispatch
+// (this function) and comparing gave a stable, reproducible breakdown where
+// the two MSM phases dominate, as expected — so the timestamp path was
+// mismeasuring on this driver, not the kernels misbehaving. Given that, this
+// slower-but-trustworthy approach is what `profile_stages` uses.
+double flushAndTime(vkp_prover *p, VkCommandBuffer &cmd, double &prev) {
+    vkEndCommandBuffer(cmd);
+    vkResetFences(p->device, 1, &p->fence);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    vkQueueSubmit(p->queue, 1, &si, p->fence);
+    vkWaitForFences(p->device, 1, &p->fence, VK_TRUE, UINT64_MAX);
+    const double now = nowMs();
+    const double delta = now - prev;
+    prev = now;
+
+    vkResetCommandBuffer(cmd, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &bi);
+    return delta;
 }
 
-vkp_result computeBatch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs, uint32_t batch) {
+vkp_result computeBatch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs, uint32_t batch,
+                        bool profile) {
     StageTimes &st = p->lastStage;
     st = StageTimes{};
     const double tStart = nowMs();
@@ -696,12 +714,14 @@ vkp_result computeBatch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs, ui
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(p->cmdBuf, &beginInfo);
-    vkCmdResetQueryPool(p->cmdBuf, p->queryPool, 0, 10);
     VkCommandBuffer cmd = p->cmdBuf;
 
-    uint32_t stamp = 0;
-    auto mark = [&]() { vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, p->queryPool, stamp++); };
-    mark(); // stamp 0: start
+    double prev = nowMs();
+    auto flush = [&](double *slot) {
+        if (!profile) return;
+        const double d = flushAndTime(p, cmd, prev);
+        if (slot) *slot = d;
+    };
 
     // 1. blob bytes -> bit-reversed Lagrange values
     {
@@ -719,7 +739,7 @@ vkp_result computeBatch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs, ui
         memcpy(r.scale_val, p->invBlob, sizeof(r.scale_val));
         recordNtt(cmd, p, p->bufPolyExt, p->bufWorkA, p->bufRootsInv, r, 64, batch);
     }
-    mark(); // stamp 1: scalar stage done
+    flush(&st.scalar_stage);
 
     // 3. circulant columns and their size-128 transforms
     {
@@ -742,22 +762,22 @@ vkp_result computeBatch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs, ui
             p->bufTable.addr};
         dispatch(cmd, p->psoPhaseA, p->pipelineLayout, pc, kCirculantSize, batch);
     }
+    flush(&st.phase_a);
 
-    mark(); // stamp 2: phase A done
     recordReduce(cmd, p, p->bufPoints, kCirculantSize, batch);
-    mark(); // stamp 3: reduce A done
+    flush(&st.reduce_a);
 
     // 5. doubling ladder over u[j], then to affine for the mixed adds
     {
         struct { uint64_t ladderAddr, uAddr; } pc{p->bufLadderJac.addr, p->bufPoints.addr};
-        dispatch(cmd, p->psoLadder, p->pipelineLayout, pc, kCirculantSize / 8, batch);
+        dispatch(cmd, p->psoLadder, p->pipelineLayout, pc, kCirculantSize / 128, batch);
     }
-    mark(); // stamp 4: ladder done
+    flush(&st.ladder);
 
     const uint32_t ladderPoints = (uint32_t)batch * kCirculantSize * kLadderPositions;
     recordNormalize(cmd, p, p->bufLadderAff, p->bufLadderJac, ladderPoints,
                     inversionChunk(ladderPoints, 32, 128, 8192));
-    mark(); // stamp 5: normalize ladder done
+    flush(&st.normalize_ladder);
 
     // 6. phase B: the fused circulant map
     {
@@ -766,21 +786,22 @@ vkp_result computeBatch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs, ui
             p->bufKernelOffsets.addr, p->bufKernelPerm.addr};
         dispatch(cmd, p->psoPhaseB, p->pipelineLayout, pc, kCirculantSize, batch);
     }
-    mark(); // stamp 6: phase B done
+    flush(&st.phase_b);
+
     recordReduce(cmd, p, p->bufProofs, kCirculantSize, batch);
-    mark(); // stamp 7: reduce B done
+    flush(&st.reduce_b);
 
     // 7. proofs -> affine -> compressed bytes
     const uint32_t proofPoints = (uint32_t)batch * kCirculantSize;
     recordNormalize(cmd, p, p->bufProofsAff, p->bufProofs, proofPoints,
                     inversionChunk(proofPoints, 4, 32, 2048));
-    mark(); // stamp 8: normalize proofs done
+    flush(&st.normalize_proofs);
 
     {
         struct { uint64_t outAddr, affineAddr; } pc{p->bufProofBytes.addr, p->bufProofsAff.addr};
         dispatch(cmd, p->psoCompress, p->pipelineLayout, pc, kCirculantSize / 64, batch);
     }
-    mark(); // stamp 9: compress done
+    flush(&st.compress);
 
     vkEndCommandBuffer(cmd);
 
@@ -794,19 +815,6 @@ vkp_result computeBatch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs, ui
     }
 
     if (*(uint32_t *)p->bufErr.mapped != 0) return VKP_ERR_INVALID_BLOB;
-
-    uint64_t stamps[10] = {0};
-    vkGetQueryPoolResults(p->device, p->queryPool, 0, stamp, sizeof(stamps), stamps,
-                          sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-    st.scalar_stage = readStamp(p, 1, stamps) - readStamp(p, 0, stamps);
-    st.phase_a = readStamp(p, 2, stamps) - readStamp(p, 1, stamps);
-    st.reduce_a = readStamp(p, 3, stamps) - readStamp(p, 2, stamps);
-    st.ladder = readStamp(p, 4, stamps) - readStamp(p, 3, stamps);
-    st.normalize_ladder = readStamp(p, 5, stamps) - readStamp(p, 4, stamps);
-    st.phase_b = readStamp(p, 6, stamps) - readStamp(p, 5, stamps);
-    st.reduce_b = readStamp(p, 7, stamps) - readStamp(p, 6, stamps);
-    st.normalize_proofs = readStamp(p, 8, stamps) - readStamp(p, 7, stamps);
-    st.compress = readStamp(p, 9, stamps) - readStamp(p, 8, stamps);
 
     memcpy(proofs, p->bufProofBytes.mapped, (size_t)batch * kCirculantSize * VKP_BYTES_PER_PROOF);
     st.total = nowMs() - tStart;
@@ -830,7 +838,7 @@ vkp_result vkp_compute_proofs_batch(vkp_prover *p, uint8_t *proofs, const uint8_
     for (size_t done = 0; done < num_blobs;) {
         const uint32_t batch = (uint32_t)std::min<size_t>(p->maxBatch, num_blobs - done);
         vkp_result rc = computeBatch(p, proofs + done * proofBytes, blobs + done * VKP_BYTES_PER_BLOB,
-                                       batch);
+                                       batch, /*profile=*/false);
         if (rc != VKP_OK) return rc;
         done += batch;
     }
@@ -850,7 +858,7 @@ vkp_result profile_batch(vkp_prover *p, unsigned char *proofs, const unsigned ch
                            unsigned batch, StageTimes &out) {
     if (!p || !blobs) return VKP_ERR_BADARGS;
     std::lock_guard<std::mutex> lock(p->mutex);
-    const vkp_result rc = computeBatch(p, proofs, blobs, batch);
+    const vkp_result rc = computeBatch(p, proofs, blobs, batch, /*profile=*/true);
     out = p->lastStage;
     return rc;
 }

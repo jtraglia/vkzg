@@ -38,7 +38,7 @@ void main() {
     }
     {
         const uint br = brev(tid, L_LOG_CIRCULANT);
-        for (int k = 0; k < FR_NLIMBS; k++) tile[br * FR_NLIMBS + k] = v.v[k];
+        [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) tile[br * FR_NLIMBS + k] = v.v[k];
     }
     barrier();
 
@@ -52,20 +52,20 @@ void main() {
             const uint base = blk * len;
             const Fr w = fr_load(rootsBuf, (jj * step * root_stride) * FR_NLIMBS);
             Fr a, c;
-            for (int k = 0; k < FR_NLIMBS; k++) a.v[k] = tile[(base + jj) * FR_NLIMBS + k];
-            for (int k = 0; k < FR_NLIMBS; k++) c.v[k] = tile[(base + jj + hlen) * FR_NLIMBS + k];
+            [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) a.v[k] = tile[(base + jj) * FR_NLIMBS + k];
+            [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) c.v[k] = tile[(base + jj + hlen) * FR_NLIMBS + k];
             c = fr_mul(c, w);
             const Fr s = fr_add(a, c);
             const Fr q = fr_sub(a, c);
-            for (int k = 0; k < FR_NLIMBS; k++) tile[(base + jj) * FR_NLIMBS + k] = s.v[k];
-            for (int k = 0; k < FR_NLIMBS; k++) tile[(base + jj + hlen) * FR_NLIMBS + k] = q.v[k];
+            [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) tile[(base + jj) * FR_NLIMBS + k] = s.v[k];
+            [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) tile[(base + jj + hlen) * FR_NLIMBS + k] = q.v[k];
         }
         barrier();
     }
 
     {
         Fr r;
-        for (int k = 0; k < FR_NLIMBS; k++) r.v[k] = tile[tid * FR_NLIMBS + k];
+        [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) r.v[k] = tile[tid * FR_NLIMBS + k];
         // coeffs[j][i], j == tid
         fr_store(coeffsBuf,
                  (b * L_CIRCULANT_SIZE * L_PHASE_A_TERMS + tid * L_PHASE_A_TERMS + i) * FR_NLIMBS, r);

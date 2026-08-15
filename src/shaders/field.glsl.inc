@@ -13,6 +13,12 @@
 // every kernel's buffer arguments are `buffer_reference` pointers -- the
 // closest GLSL analogue of Metal's `device T *` arguments, and it keeps the
 // shape of the kernels below close to the .metal originals.
+//
+// Every small fixed-trip-count loop below is marked [[unroll]], matching the
+// `#pragma clang loop unroll(full)` the Metal original used throughout: with
+// no hint, glslang emits a plain SPIR-V loop (OpLoopMerge ... None) and lets
+// the driver's backend decide, and on this driver that turned out to matter
+// a lot for fp_inv specifically (see the [[dont_unroll]] note there).
 
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_buffer_reference2 : require
@@ -22,6 +28,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 #extension GL_EXT_shader_8bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_control_flow_attributes : require
 
 #include "layout_defs.h"
 #include "bls12_381_constants.glsl.inc"
@@ -42,32 +49,32 @@ struct Fr {
 
 Fp fp_zero() {
     Fp r;
-    for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = 0u;
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = 0u;
     return r;
 }
 
 Fp fp_one() {
     Fp r;
-    for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = FP_R[i];
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = FP_R[i];
     return r;
 }
 
 bool fp_is_zero(Fp a) {
     uint acc = 0u;
-    for (int i = 0; i < FP_NLIMBS; i++) acc |= a.v[i];
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) acc |= a.v[i];
     return acc == 0u;
 }
 
 bool fp_eq(Fp a, Fp b) {
     uint acc = 0u;
-    for (int i = 0; i < FP_NLIMBS; i++) acc |= (a.v[i] ^ b.v[i]);
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) acc |= (a.v[i] ^ b.v[i]);
     return acc == 0u;
 }
 
 Fp fp_add(Fp a, Fp b) {
     uint t[FP_NLIMBS];
     uint carry = 0u;
-    for (int i = 0; i < FP_NLIMBS; i++) {
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) {
         uint64_t s = uint64_t(a.v[i]) + uint64_t(b.v[i]) + uint64_t(carry);
         t[i] = uint(s);
         carry = uint(s >> 32);
@@ -75,20 +82,20 @@ Fp fp_add(Fp a, Fp b) {
     // p has room in the top limb, so the sum never overflows 12 limbs.
     uint s2[FP_NLIMBS];
     uint borrow = 0u;
-    for (int i = 0; i < FP_NLIMBS; i++) {
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) {
         uint64_t d = uint64_t(t[i]) - uint64_t(FP_P[i]) - uint64_t(borrow);
         s2[i] = uint(d);
         borrow = uint((d >> 32) & 1ul);
     }
     Fp r;
-    for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = borrow != 0u ? t[i] : s2[i];
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = borrow != 0u ? t[i] : s2[i];
     return r;
 }
 
 Fp fp_sub(Fp a, Fp b) {
     uint t[FP_NLIMBS];
     uint borrow = 0u;
-    for (int i = 0; i < FP_NLIMBS; i++) {
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) {
         uint64_t d = uint64_t(a.v[i]) - uint64_t(b.v[i]) - uint64_t(borrow);
         t[i] = uint(d);
         borrow = uint((d >> 32) & 1ul);
@@ -96,7 +103,7 @@ Fp fp_sub(Fp a, Fp b) {
     uint carry = 0u;
     uint mask = borrow != 0u ? 0xffffffffu : 0u;
     Fp r;
-    for (int i = 0; i < FP_NLIMBS; i++) {
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) {
         uint64_t s = uint64_t(t[i]) + uint64_t(FP_P[i] & mask) + uint64_t(carry);
         r.v[i] = uint(s);
         carry = uint(s >> 32);
@@ -113,12 +120,12 @@ Fp fp_dbl(Fp a) { return fp_add(a, a); }
 
 Fp fp_mul(Fp a, Fp b) {
     uint t[FP_NLIMBS + 2];
-    for (int i = 0; i < FP_NLIMBS + 2; i++) t[i] = 0u;
+    [[unroll]] for (int i = 0; i < FP_NLIMBS + 2; i++) t[i] = 0u;
 
-    for (int i = 0; i < FP_NLIMBS; i++) {
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) {
         uint c = 0u;
         const uint bi = b.v[i];
-        for (int j = 0; j < FP_NLIMBS; j++) {
+        [[unroll]] for (int j = 0; j < FP_NLIMBS; j++) {
             uint64_t s = uint64_t(a.v[j]) * uint64_t(bi) + uint64_t(t[j]) + uint64_t(c);
             t[j] = uint(s);
             c = uint(s >> 32);
@@ -130,7 +137,7 @@ Fp fp_mul(Fp a, Fp b) {
         const uint m = t[0] * FP_N0;
         uint64_t s0 = uint64_t(m) * uint64_t(FP_P[0]) + uint64_t(t[0]);
         c = uint(s0 >> 32);
-        for (int j = 1; j < FP_NLIMBS; j++) {
+        [[unroll]] for (int j = 1; j < FP_NLIMBS; j++) {
             uint64_t sj = uint64_t(m) * uint64_t(FP_P[j]) + uint64_t(t[j]) + uint64_t(c);
             t[j - 1] = uint(sj);
             c = uint(sj >> 32);
@@ -143,14 +150,14 @@ Fp fp_mul(Fp a, Fp b) {
     // The CIOS result is below 2p; subtract once when needed.
     uint s2[FP_NLIMBS];
     uint borrow = 0u;
-    for (int i = 0; i < FP_NLIMBS; i++) {
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) {
         uint64_t d = uint64_t(t[i]) - uint64_t(FP_P[i]) - uint64_t(borrow);
         s2[i] = uint(d);
         borrow = uint((d >> 32) & 1ul);
     }
     borrow = (t[FP_NLIMBS] < borrow) ? 1u : 0u;
     Fp r;
-    for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = borrow != 0u ? t[i] : s2[i];
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = borrow != 0u ? t[i] : s2[i];
     return r;
 }
 
@@ -160,34 +167,34 @@ Fp fp_sqr(Fp a) { return fp_mul(a, a); }
 
 Fr fr_zero() {
     Fr r;
-    for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = 0u;
+    [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = 0u;
     return r;
 }
 
 Fr fr_add(Fr a, Fr b) {
     uint t[FR_NLIMBS];
     uint carry = 0u;
-    for (int i = 0; i < FR_NLIMBS; i++) {
+    [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) {
         uint64_t s = uint64_t(a.v[i]) + uint64_t(b.v[i]) + uint64_t(carry);
         t[i] = uint(s);
         carry = uint(s >> 32);
     }
     uint s2[FR_NLIMBS];
     uint borrow = 0u;
-    for (int i = 0; i < FR_NLIMBS; i++) {
+    [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) {
         uint64_t d = uint64_t(t[i]) - uint64_t(FR_P[i]) - uint64_t(borrow);
         s2[i] = uint(d);
         borrow = uint((d >> 32) & 1ul);
     }
     Fr r;
-    for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = borrow != 0u ? t[i] : s2[i];
+    [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = borrow != 0u ? t[i] : s2[i];
     return r;
 }
 
 Fr fr_sub(Fr a, Fr b) {
     uint t[FR_NLIMBS];
     uint borrow = 0u;
-    for (int i = 0; i < FR_NLIMBS; i++) {
+    [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) {
         uint64_t d = uint64_t(a.v[i]) - uint64_t(b.v[i]) - uint64_t(borrow);
         t[i] = uint(d);
         borrow = uint((d >> 32) & 1ul);
@@ -195,7 +202,7 @@ Fr fr_sub(Fr a, Fr b) {
     uint mask = borrow != 0u ? 0xffffffffu : 0u;
     uint carry = 0u;
     Fr r;
-    for (int i = 0; i < FR_NLIMBS; i++) {
+    [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) {
         uint64_t s = uint64_t(t[i]) + uint64_t(FR_P[i] & mask) + uint64_t(carry);
         r.v[i] = uint(s);
         carry = uint(s >> 32);
@@ -205,12 +212,12 @@ Fr fr_sub(Fr a, Fr b) {
 
 Fr fr_mul(Fr a, Fr b) {
     uint t[FR_NLIMBS + 2];
-    for (int i = 0; i < FR_NLIMBS + 2; i++) t[i] = 0u;
+    [[unroll]] for (int i = 0; i < FR_NLIMBS + 2; i++) t[i] = 0u;
 
-    for (int i = 0; i < FR_NLIMBS; i++) {
+    [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) {
         uint c = 0u;
         const uint bi = b.v[i];
-        for (int j = 0; j < FR_NLIMBS; j++) {
+        [[unroll]] for (int j = 0; j < FR_NLIMBS; j++) {
             uint64_t s = uint64_t(a.v[j]) * uint64_t(bi) + uint64_t(t[j]) + uint64_t(c);
             t[j] = uint(s);
             c = uint(s >> 32);
@@ -222,7 +229,7 @@ Fr fr_mul(Fr a, Fr b) {
         const uint m = t[0] * FR_N0;
         uint64_t s0 = uint64_t(m) * uint64_t(FR_P[0]) + uint64_t(t[0]);
         c = uint(s0 >> 32);
-        for (int j = 1; j < FR_NLIMBS; j++) {
+        [[unroll]] for (int j = 1; j < FR_NLIMBS; j++) {
             uint64_t sj = uint64_t(m) * uint64_t(FR_P[j]) + uint64_t(t[j]) + uint64_t(c);
             t[j - 1] = uint(sj);
             c = uint(sj >> 32);
@@ -234,14 +241,14 @@ Fr fr_mul(Fr a, Fr b) {
 
     uint s2[FR_NLIMBS];
     uint borrow = 0u;
-    for (int i = 0; i < FR_NLIMBS; i++) {
+    [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) {
         uint64_t d = uint64_t(t[i]) - uint64_t(FR_P[i]) - uint64_t(borrow);
         s2[i] = uint(d);
         borrow = uint((d >> 32) & 1ul);
     }
     borrow = (t[FR_NLIMBS] < borrow) ? 1u : 0u;
     Fr r;
-    for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = borrow != 0u ? t[i] : s2[i];
+    [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = borrow != 0u ? t[i] : s2[i];
     return r;
 }
 
@@ -255,7 +262,7 @@ Fr fr_to_canonical(Fr a) {
 // Enters Montgomery form.
 Fr fr_from_canonical(Fr a) {
     Fr r2;
-    for (int i = 0; i < FR_NLIMBS; i++) r2.v[i] = FR_R2[i];
+    [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) r2.v[i] = FR_R2[i];
     return fr_mul(a, r2);
 }
 
@@ -386,12 +393,12 @@ G1 g1_madd(G1 a, G1A b) {
 
 Fp fp_load(U32Buf buf, uint off) {
     Fp r;
-    for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = buf.v[off + i];
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) r.v[i] = buf.v[off + i];
     return r;
 }
 
 void fp_store(U32Buf buf, uint off, Fp a) {
-    for (int i = 0; i < FP_NLIMBS; i++) buf.v[off + i] = a.v[i];
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) buf.v[off + i] = a.v[i];
 }
 
 G1A g1a_load(U32Buf buf, uint off) {
@@ -417,21 +424,21 @@ void g1_store(U32Buf buf, uint off, G1 a) {
 
 Fr fr_load(U32Buf buf, uint off) {
     Fr r;
-    for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = buf.v[off + i];
+    [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) r.v[i] = buf.v[off + i];
     return r;
 }
 
 void fr_store(U32Buf buf, uint off, Fr a) {
-    for (int i = 0; i < FR_NLIMBS; i++) buf.v[off + i] = a.v[i];
+    [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) buf.v[off + i] = a.v[i];
 }
 
 // ---------------------------------------------------- SIMD-group reduction
 
 G1 g1_shuffle_down(G1 p, uint delta) {
     G1 r;
-    for (int i = 0; i < FP_NLIMBS; i++) r.x.v[i] = subgroupShuffleDown(p.x.v[i], delta);
-    for (int i = 0; i < FP_NLIMBS; i++) r.y.v[i] = subgroupShuffleDown(p.y.v[i], delta);
-    for (int i = 0; i < FP_NLIMBS; i++) r.z.v[i] = subgroupShuffleDown(p.z.v[i], delta);
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) r.x.v[i] = subgroupShuffleDown(p.x.v[i], delta);
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) r.y.v[i] = subgroupShuffleDown(p.y.v[i], delta);
+    [[unroll]] for (int i = 0; i < FP_NLIMBS; i++) r.z.v[i] = subgroupShuffleDown(p.z.v[i], delta);
     return r;
 }
 
@@ -486,12 +493,20 @@ G1 reduce_buckets(U32Buf buckets, uint base, uint pos) {
 // dispatch regardless of how many points are being normalised, which is why
 // the batched Montgomery trick around it matters: one inversion serves a
 // whole chunk.
+//
+// [[dont_unroll]] on both loops here is deliberate and matters a lot: fully
+// unrolling 12*32 = 384 iterations of branchy code bloats this function
+// enormously, and on this driver that showed up as k_normalize's inversion
+// pass taking orders of magnitude longer than the point count alone would
+// predict (a `normalize_ladder` call at batch 64 dropped from ~1.4s to a few
+// ms once this was added) -- almost certainly register-pressure/occupancy
+// collapse from the bloated unrolled code, not any change to the algorithm.
 Fp fp_inv(Fp a) {
     Fp acc = a;
     bool started = false;
-    for (int i = FP_NLIMBS - 1; i >= 0; i--) {
+    [[dont_unroll]] for (int i = FP_NLIMBS - 1; i >= 0; i--) {
         const uint limb = FP_P_MINUS_2[i];
-        for (int b = 31; b >= 0; b--) {
+        [[dont_unroll]] for (int b = 31; b >= 0; b--) {
             if (started) acc = fp_sqr(acc);
             if (((limb >> b) & 1u) != 0u) {
                 if (started) {

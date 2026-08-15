@@ -23,7 +23,7 @@ void main() {
     const uint obase = (b * L_CIRCULANT_SIZE + dst) * L_BYTES_PER_PROOF;
 
     if (g1a_is_identity(p)) {
-        for (int k = 0; k < L_BYTES_PER_PROOF; k++) outBuf.v[obase + k] = uint8_t(0);
+        [[unroll]] for (int k = 0; k < L_BYTES_PER_PROOF; k++) outBuf.v[obase + k] = uint8_t(0);
         outBuf.v[obase] = uint8_t(0xc0); // compressed | infinity
         return;
     }
@@ -33,7 +33,7 @@ void main() {
     x = fp_to_canonical(x);
     y = fp_to_canonical(y);
     // 12 little-endian 32-bit limbs -> 48 big-endian bytes.
-    for (int limb = 0; limb < FP_NLIMBS; limb++) {
+    [[unroll]] for (int limb = 0; limb < FP_NLIMBS; limb++) {
         const uint w = x.v[limb];
         const uint off = uint(FP_NLIMBS - 1 - limb) * 4u;
         outBuf.v[obase + off + 0] = uint8_t(w >> 24);

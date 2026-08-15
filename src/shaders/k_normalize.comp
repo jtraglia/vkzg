@@ -43,7 +43,7 @@ void main() {
         const uint dst = i * L_AFFINE_WORDS;
         const Fp z = fp_load(inJacobianBuf, i * L_JACOBIAN_WORDS + 2 * FP_NLIMBS);
         if (fp_is_zero(z)) {
-            for (int k = 0; k < L_AFFINE_WORDS; k++) outAffineBuf.v[dst + k] = 0u;
+            [[unroll]] for (int k = 0; k < L_AFFINE_WORDS; k++) outAffineBuf.v[dst + k] = 0u;
         } else {
             const Fp pre = fp_load(scratchBuf, i * FP_NLIMBS);
             const Fp zinv = fp_mul(pre, inv);
