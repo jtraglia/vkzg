@@ -197,6 +197,10 @@ def main():
     d.append(f"constant uint FP_R[12] = {{ {fmt(to_mont(1, P, 384), 12, 32)} }};\n")
     d.append(f"constant uint FP_R2[12] = {{ {fmt(to_mont(to_mont(1, P, 384), P, 384), 12, 32)} }};\n")
     d.append(f"constant uint FP_BETA[12] = {{ {fmt(to_mont(BETA, P, 384), 12, 32)} }};\n")
+    # Exponent for the Fermat inversion, and (p-1)/2 for the compressed-point
+    # sign bit.  Both are plain integers, not Montgomery values.
+    d.append(f"constant uint FP_P_MINUS_2[12] = {{ {fmt(P - 2, 12, 32)} }};\n")
+    d.append(f"constant uint FP_P_HALF[12] = {{ {fmt((P - 1) // 2, 12, 32)} }};\n")
     d.append(f"constant uint FR_P[8] = {{ {fmt(R, 8, 32)} }};\n")
     d.append(f"constant uint FR_N0 = 0x{n0(R, 32):08x}u;\n")
     d.append(f"constant uint FR_ONE[8] = {{ {fmt(to_mont(1, R, 256), 8, 32)} }};\n")

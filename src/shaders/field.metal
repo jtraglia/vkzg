@@ -531,3 +531,48 @@ static inline G1 reduce_buckets(device const uint *buckets, uint pos) {
     for (uint t = 0u; t < L_LOG_REDUCE_PER_LANE; t++) w = g1_dbl(w);
     return g1_add(rs, w);
 }
+
+// ------------------------------------------------------- inversion, encoding
+
+// a^(p-2) by square-and-multiply.  ~381 squarings and ~190 multiplies, so the
+// dependency chain is ~570 F_p multiplies deep -- about 2ms on this GPU.  That
+// is a fixed cost per dispatch regardless of how many points are being
+// normalised, which is why the batched Montgomery trick around it matters: one
+// inversion serves a whole chunk.
+static inline Fp fp_inv(thread const Fp &a) {
+    Fp acc = a;
+    bool started = false;
+#pragma clang loop unroll(disable)
+    for (int i = FP_NLIMBS - 1; i >= 0; i--) {
+        const uint limb = FP_P_MINUS_2[i];
+#pragma clang loop unroll(disable)
+        for (int b = 31; b >= 0; b--) {
+            if (started) acc = fp_sqr(acc);
+            if ((limb >> b) & 1u) {
+                if (started) {
+                    acc = fp_mul(acc, a);
+                } else {
+                    acc = a;
+                    started = true;
+                }
+            }
+        }
+    }
+    return acc;
+}
+
+// Leaves Montgomery form: multiplying by 1 divides out R.
+static inline Fp fp_to_canonical(thread const Fp &a) {
+    Fp one = fp_zero();
+    one.v[0] = 1u;
+    return fp_mul(a, one);
+}
+
+// True when the canonical representative exceeds (p-1)/2, which is the sign bit
+// the compressed encoding carries.
+static inline bool fp_is_lex_largest(thread const Fp &canonical) {
+    for (int i = FP_NLIMBS - 1; i >= 0; i--) {
+        if (canonical.v[i] != FP_P_HALF[i]) return canonical.v[i] > FP_P_HALF[i];
+    }
+    return false;
+}

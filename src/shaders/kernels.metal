@@ -427,3 +427,114 @@ kernel void k_bucket_reduce(device uint *out [[buffer(0)]], device const uint *b
         g1_store(out + ((ulong)b * L_CIRCULANT_SIZE + j) * L_JACOBIAN_WORDS, total);
     }
 }
+
+// ---------------------------------------------------------------- ladder
+
+// L[j][d] = 2^(8d) * u[j], the shared base set for phase B.
+//
+// This is 248 sequential doublings over 128 points per blob, so at small batch
+// sizes it is latency-bound rather than throughput-bound; batching is what
+// makes it cheap, since the parallelism is 128 * blobs.
+kernel void k_ladder(device uint *ladder [[buffer(0)]], device const uint *u [[buffer(1)]],
+                     uint2 gid [[thread_position_in_grid]]) {
+    const uint j = gid.x;
+    const uint b = gid.y;
+    G1 acc = g1_load(u + ((ulong)b * L_CIRCULANT_SIZE + j) * L_JACOBIAN_WORDS);
+    for (uint d = 0u; d < L_LADDER_POSITIONS; d++) {
+        g1_store(ladder + (((ulong)b * L_CIRCULANT_SIZE + j) * L_LADDER_POSITIONS + d) *
+                              L_JACOBIAN_WORDS,
+                 acc);
+#pragma clang loop unroll(full)
+        for (uint s = 0u; s < L_WINDOW_BITS; s++) acc = g1_dbl(acc);
+    }
+}
+
+// ------------------------------------------------------- affine conversion
+
+struct NormalizeParams {
+    uint count; // total points
+    uint chunk; // points per thread; one field inversion each
+};
+
+// Jacobian -> affine for `count` points, Montgomery's trick per chunk.
+// Points at infinity become (0, 0), which the accumulation kernels treat as the
+// identity.
+kernel void k_normalize(device uint *out_affine [[buffer(0)]],
+                        device const uint *in_jacobian [[buffer(1)]],
+                        device uint *scratch [[buffer(2)]],
+                        constant NormalizeParams &P [[buffer(3)]],
+                        uint gid [[thread_position_in_grid]]) {
+    const uint lo = gid * P.chunk;
+    if (lo >= P.count) return;
+    const uint hi = min(lo + P.chunk, P.count);
+
+    Fp acc = fp_one();
+    for (uint i = lo; i < hi; i++) {
+        const Fp z = fp_load(in_jacobian + (ulong)i * L_JACOBIAN_WORDS + 2 * FP_NLIMBS);
+        fp_store(scratch + (ulong)i * FP_NLIMBS, acc);
+        if (!fp_is_zero(z)) acc = fp_mul(acc, z);
+    }
+    Fp inv = fp_inv(acc);
+
+    for (uint i = hi; i-- > lo;) {
+        device uint *dst = out_affine + (ulong)i * L_AFFINE_WORDS;
+        const Fp z = fp_load(in_jacobian + (ulong)i * L_JACOBIAN_WORDS + 2 * FP_NLIMBS);
+        if (fp_is_zero(z)) {
+#pragma clang loop unroll(full)
+            for (int k = 0; k < L_AFFINE_WORDS; k++) dst[k] = 0u;
+        } else {
+            const Fp pre = fp_load(scratch + (ulong)i * FP_NLIMBS);
+            const Fp zinv = fp_mul(pre, inv);
+            inv = fp_mul(inv, z);
+            const Fp z2 = fp_sqr(zinv);
+            const Fp z3 = fp_mul(z2, zinv);
+            const Fp x = fp_load(in_jacobian + (ulong)i * L_JACOBIAN_WORDS);
+            const Fp y = fp_load(in_jacobian + (ulong)i * L_JACOBIAN_WORDS + FP_NLIMBS);
+            const Fp xa = fp_mul(x, z2);
+            const Fp ya = fp_mul(y, z3);
+            fp_store(dst, xa);
+            fp_store(dst + FP_NLIMBS, ya);
+        }
+        if (i == lo) break;
+    }
+}
+
+// ------------------------------------------------------ proof serialisation
+
+// Affine proofs -> 48-byte compressed encoding, applying the bit-reversal
+// permutation on the way out (FK20 emits natural order; cells are indexed
+// bit-reversed).
+kernel void k_compress_proofs(device uchar *out [[buffer(0)]],
+                              device const uint *affine [[buffer(1)]],
+                              uint2 gid [[thread_position_in_grid]]) {
+    const uint i = gid.x;
+    const uint b = gid.y;
+    const G1A p = g1a_load(affine + ((ulong)b * L_CIRCULANT_SIZE + i) * L_AFFINE_WORDS);
+    const uint dst = brev(i, L_LOG_CIRCULANT);
+    device uchar *o = out + ((ulong)b * L_CIRCULANT_SIZE + dst) * L_BYTES_PER_PROOF;
+
+    if (g1a_is_identity(p)) {
+#pragma clang loop unroll(full)
+        for (int k = 0; k < L_BYTES_PER_PROOF; k++) o[k] = 0;
+        o[0] = 0xc0; // compressed | infinity
+        return;
+    }
+
+    Fp x = p.x;
+    Fp y = p.y;
+    x = fp_to_canonical(x);
+    y = fp_to_canonical(y);
+    // 12 little-endian 32-bit limbs -> 48 big-endian bytes.
+#pragma clang loop unroll(full)
+    for (int limb = 0; limb < FP_NLIMBS; limb++) {
+        const uint w = x.v[limb];
+        const uint off = (uint)(FP_NLIMBS - 1 - limb) * 4u;
+        o[off + 0] = (uchar)(w >> 24);
+        o[off + 1] = (uchar)(w >> 16);
+        o[off + 2] = (uchar)(w >> 8);
+        o[off + 3] = (uchar)w;
+    }
+    uchar flags = 0x80; // compressed
+    if (fp_is_lex_largest(y)) flags |= 0x20;
+    o[0] |= flags;
+}

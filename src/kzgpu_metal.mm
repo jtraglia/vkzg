@@ -4,8 +4,6 @@
 
 #include "../include/kzgpu.h"
 #include "cpu/bls12_381.h"
-#include "cpu/device_convert.h"
-#include "cpu/cpu_msm.h"
 #include "cpu/setup.h"
 #include "kzgpu_internal.h"
 #include "kzgpu_profile.h"
@@ -62,6 +60,9 @@ struct kzgpu_prover {
     id<MTLComputePipelineState> psoPhaseASort = nil;
     id<MTLComputePipelineState> psoPhaseA = nil;
     id<MTLComputePipelineState> psoPhaseB = nil;
+    id<MTLComputePipelineState> psoLadder = nil;
+    id<MTLComputePipelineState> psoNormalize = nil;
+    id<MTLComputePipelineState> psoCompress = nil;
     id<MTLComputePipelineState> psoReduce = nil;
 
     // Setup-derived, immutable.
@@ -86,7 +87,11 @@ struct kzgpu_prover {
     id<MTLBuffer> bufPerm = nil;   // per-output lane -> bucket ordering
     id<MTLBuffer> bufPoints = nil;     // u[j], then reused for the proofs
     id<MTLBuffer> bufProofs = nil;
+    id<MTLBuffer> bufLadderJac = nil;
     id<MTLBuffer> bufLadderAff = nil;
+    id<MTLBuffer> bufProofsAff = nil;
+    id<MTLBuffer> bufProofBytes = nil;
+    id<MTLBuffer> bufNormScratch = nil;
     id<MTLBuffer> bufErr = nil;
 
     uint32_t maxBatch = 0;
@@ -97,41 +102,8 @@ struct kzgpu_prover {
     uint32_t invExtBlob[kFrLimbs] = {0};
 
     StageTimes lastStage; // filled by computeBatch, read by profile_batch
-
-    // Concurrent CPU assist. `splitA`/`splitB` are the number of outputs the
-    // GPU takes; the rest go to the pool. Both are re-balanced from measured
-    // per-output cost so the two finish together.
-    std::unique_ptr<ThreadPool> pool;
-    std::vector<uint32_t> cpuStaging; // CPU results, copied in once the GPU is done
-    int splitA = kCirculantSize;
-    int splitB = kCirculantSize;
-    double gpuCostA = 0, cpuCostA = 0, gpuCostB = 0, cpuCostB = 0;
 };
 
-namespace {
-// Re-balance so that split*gpuCost == (128-split)*cpuCost, damped by an EWMA.
-//
-// The reduction dispatch rounds up and clamps, so any split from 1 to 128 is
-// valid; quantising to its threadgroup size used to strand the balancer a few
-// percent away from the optimum.
-void rebalance(int &split, double gpuTime, double cpuTime, int gpuCount, int cpuCount,
-               double &gpuCost, double &cpuCost) {
-    if (gpuCount > 0 && gpuTime > 0) {
-        const double c = gpuTime / gpuCount;
-        gpuCost = gpuCost > 0 ? 0.7 * gpuCost + 0.3 * c : c;
-    }
-    if (cpuCount > 0 && cpuTime > 0) {
-        const double c = cpuTime / cpuCount;
-        cpuCost = cpuCost > 0 ? 0.7 * cpuCost + 0.3 * c : c;
-    }
-    if (gpuCost <= 0 || cpuCost <= 0) return;
-    const double ideal = kCirculantSize * cpuCost / (gpuCost + cpuCost);
-    int next = (int)(ideal + 0.5);
-    if (next < 1) next = 1;
-    if (next > kCirculantSize) next = kCirculantSize;
-    split = next;
-}
-} // namespace
 
 // --------------------------------------------------------------------- utils
 
@@ -152,7 +124,6 @@ void kzgpu_options_default(kzgpu_options *opts) {
     if (!opts) return;
     opts->table_cache_path = nullptr;
     opts->validate_setup = 0;
-    opts->cpu_assist_threads = 0;
     opts->max_batch_size = 0;
 }
 
@@ -189,20 +160,28 @@ bool allocateWorkingSet(kzgpu_prover *p, uint32_t batch) {
     p->bufPerm = makeBuffer(p->device, B * kCirculantSize * kNumBuckets * 4);
     p->bufPoints = makeBuffer(p->device, B * kCirculantSize * kJacobianWords * 4);
     p->bufProofs = makeBuffer(p->device, B * kCirculantSize * kJacobianWords * 4);
+    p->bufLadderJac =
+        makeBuffer(p->device, B * kCirculantSize * kLadderPositions * kJacobianWords * 4);
     p->bufLadderAff =
         makeBuffer(p->device, B * kCirculantSize * kLadderPositions * kAffineWords * 4);
+    p->bufProofsAff = makeBuffer(p->device, B * kCirculantSize * kAffineWords * 4);
+    p->bufProofBytes = makeBuffer(p->device, B * kCirculantSize * kBytesPerProof);
+    // Prefix products for the batched inversion; sized for the larger of the
+    // two normalisation passes.
+    p->bufNormScratch =
+        makeBuffer(p->device, B * kCirculantSize * kLadderPositions * kFpLimbs * 4);
     p->bufErr = makeBuffer(p->device, 4);
 
     if (!p->bufBlob || !p->bufLagrange || !p->bufWorkA || !p->bufPolyExt || !p->bufEvals ||
         !p->bufCells || !p->bufCoeffs || !p->bufBuckets || !p->bufItems || !p->bufStarts || !p->bufPerm ||
         !p->bufPoints || !p->bufProofs ||
-        !p->bufLadderAff || !p->bufErr) {
+        !p->bufLadderJac || !p->bufLadderAff || !p->bufProofsAff ||
+        !p->bufProofBytes || !p->bufNormScratch || !p->bufErr) {
         return false;
     }
     // The forward transform reads a zero-padded polynomial; the upper half is
     // never written, so zero it once here.
     memset(p->bufPolyExt.contents, 0, p->bufPolyExt.length);
-    p->cpuStaging.assign((size_t)batch * kCirculantSize * kJacobianWords, 0);
     p->maxBatch = batch;
     return true;
 }
@@ -232,6 +211,9 @@ kzgpu_result buildPipelines(kzgpu_prover *p) {
         {"k_phase_a_sort", &p->psoPhaseASort},
         {"k_phase_a", &p->psoPhaseA},
         {"k_phase_b", &p->psoPhaseB},
+        {"k_ladder", &p->psoLadder},
+        {"k_normalize", &p->psoNormalize},
+        {"k_compress_proofs", &p->psoCompress},
         {"k_bucket_reduce", &p->psoReduce},
     };
     for (auto &k : kernels) {
@@ -279,18 +261,6 @@ kzgpu_result createProver(kzgpu_prover **out, SetupTables &tables, const kzgpu_o
         makeBufferFrom(p->device, tables.kernel_perm.data(), tables.kernel_perm.size() * 4);
     memcpy(p->invBlob, tables.inv_blob, sizeof(p->invBlob));
     memcpy(p->invExtBlob, tables.inv_ext_blob, sizeof(p->invExtBlob));
-
-    int32_t cpuThreads = opts ? opts->cpu_assist_threads : 0;
-    if (cpuThreads == 0) {
-        unsigned hw = std::thread::hardware_concurrency();
-        cpuThreads = hw > 1 ? (int32_t)(hw - 1) : 1;
-    }
-    if (cpuThreads > 0) {
-        p->pool.reset(new ThreadPool((unsigned)cpuThreads));
-        // Start at an even split and let the controller find the balance.
-        p->splitA = kCirculantSize / 2;
-        p->splitB = kCirculantSize / 2;
-    }
 
     uint32_t batch = opts && opts->max_batch_size ? opts->max_batch_size : 4;
     if (!allocateWorkingSet(p, batch)) {
@@ -398,18 +368,58 @@ NttParams nttPass2(uint32_t N, uint32_t N1, uint32_t N2, uint32_t inBatch, uint3
 // CPU writes to its own staging array rather than straight into the Metal
 // buffer, because the GPU is concurrently writing the [0, split) range of the
 // same allocation and Metal makes no promise about that overlap.
-void copyStagedOutputs(kzgpu_prover *p, id<MTLBuffer> dst, uint32_t batch, int split) {
-    const int n = kCirculantSize - split;
-    if (n <= 0) return;
-    uint32_t *d = (uint32_t *)dst.contents;
-    for (uint32_t b = 0; b < batch; b++) {
-        const size_t off = ((size_t)b * kCirculantSize + (size_t)split) * kJacobianWords;
-        memcpy(d + off, p->cpuStaging.data() + off, (size_t)n * kJacobianWords * 4);
-    }
+// Points per thread in the batched inversion.
+//
+// Each chunk pays one field inversion, which is ~570 multiplies deep and so
+// costs a fixed ~2ms of latency no matter how few points it covers.  Bigger
+// chunks amortise that better; smaller chunks give more threads.  Rather than
+// pin a constant tuned to an 8-core M1, size the chunk so the dispatch keeps a
+// few thousand threads busy, with a floor that keeps the inversion below ~18
+// multiplies per point.  A 64-core part running large batches therefore gets
+// proportionally more threads instead of inheriting this machine's shape.
+uint32_t inversionChunk(uint32_t count, uint32_t floorChunk, uint32_t ceilChunk,
+                        uint32_t targetThreads) {
+    uint32_t chunk = count / targetThreads;
+    if (chunk < floorChunk) chunk = floorChunk;
+    if (chunk > ceilChunk) chunk = ceilChunk;
+    return chunk;
 }
 
+void encodeReduce(id<MTLComputeCommandEncoder> enc, kzgpu_prover *p, id<MTLBuffer> out,
+                  uint32_t count, uint32_t batch) {
+    [enc setComputePipelineState:p->psoReduce];
+    [enc setBuffer:out offset:0 atIndex:0];
+    [enc setBuffer:p->bufBuckets offset:0 atIndex:1];
+    [enc setBytes:&count length:4 atIndex:2];
+    [enc dispatchThreadgroups:MTLSizeMake((count + L_REDUCE_OUTPUTS_PER_TG - 1) /
+                                              L_REDUCE_OUTPUTS_PER_TG,
+                                          batch, 1)
+        threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
+}
+
+struct NormalizeParams {
+    uint32_t count;
+    uint32_t chunk;
+};
+
+void encodeNormalize(id<MTLComputeCommandEncoder> enc, kzgpu_prover *p, id<MTLBuffer> outAffine,
+                     id<MTLBuffer> inJacobian, uint32_t count, uint32_t chunk) {
+    NormalizeParams np{count, chunk};
+    const uint32_t threads = (count + chunk - 1) / chunk;
+    [enc setComputePipelineState:p->psoNormalize];
+    [enc setBuffer:outAffine offset:0 atIndex:0];
+    [enc setBuffer:inJacobian offset:0 atIndex:1];
+    [enc setBuffer:p->bufNormScratch offset:0 atIndex:2];
+    [enc setBytes:&np length:sizeof(np) atIndex:3];
+    [enc dispatchThreads:MTLSizeMake(threads, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(threads < 64 ? threads : 64, 1, 1)];
+}
+
+// `stageSplit` is for the profiler only: it flushes the command buffer at each
+// stage boundary so the stages can be timed individually.  Normal calls encode
+// everything into one command buffer.
 kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, const uint8_t *blobs,
-                          uint32_t batch) {
+                          uint32_t batch, bool stageSplit = false) {
     @autoreleasepool {
         StageTimes &st = p->lastStage;
         st = StageTimes{};
@@ -417,10 +427,26 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
         memcpy(p->bufBlob.contents, blobs, (size_t)batch * KZGPU_BYTES_PER_BLOB);
         *(uint32_t *)p->bufErr.contents = 0;
 
-        // ---- pass 1: scalar work, up to and including the circulant columns.
-        id<MTLCommandBuffer> cb1 = [p->queue commandBuffer];
-        id<MTLComputeCommandEncoder> enc = [cb1 computeCommandEncoder];
+        // The whole pipeline is one command buffer: nothing needs the host in
+        // the middle, so there is no synchronisation point to pay for.
+        id<MTLCommandBuffer> cb = [p->queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+        bool failed = false;
 
+        // Ends the current stage. In profiling mode that means commit, wait,
+        // record the GPU time and open a fresh buffer; otherwise it is a no-op.
+        auto stage = [&](double *slot) {
+            if (!stageSplit) return;
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (cb.error) failed = true;
+            if (slot) *slot = (cb.GPUEndTime - cb.GPUStartTime) * 1e3;
+            cb = [p->queue commandBuffer];
+            enc = [cb computeCommandEncoder];
+        };
+
+        // 1. blob bytes -> bit-reversed Lagrange values
         [enc setComputePipelineState:p->psoBlobToFr];
         [enc setBuffer:p->bufLagrange offset:0 atIndex:0];
         [enc setBuffer:p->bufBlob offset:0 atIndex:1];
@@ -428,6 +454,7 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
         [enc dispatchThreads:MTLSizeMake(kFieldElementsPerBlob, batch, 1)
             threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
 
+        // 2. inverse transform of size 4096 -> monomial coefficients
         {
             NttParams q = nttPass1(4096, 64, 64, kFieldElementsPerBlob, kFieldElementsPerExtBlob);
             encodeNtt(enc, p, p->bufWorkA, p->bufLagrange, p->bufRootsInv, q, 64, batch);
@@ -438,6 +465,7 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
         }
 
         if (cells) {
+            // 3. forward transform of size 8192 over the zero-padded polynomial
             NttParams q = nttPass1(8192, 64, 128, kFieldElementsPerExtBlob, kFieldElementsPerExtBlob);
             encodeNtt(enc, p, p->bufWorkA, p->bufPolyExt, p->bufRootsFwd, q, 128, batch);
             NttParams r = nttPass2(8192, 64, 128, kFieldElementsPerExtBlob, kFieldElementsPerExtBlob);
@@ -451,162 +479,98 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
         }
 
         if (proofs) {
+            stage(&st.scalar_stage);
+
+            // 4. circulant columns and their size-128 transforms
             [enc setComputePipelineState:p->psoBuildCirculant];
             [enc setBuffer:p->bufCoeffs offset:0 atIndex:0];
             [enc setBuffer:p->bufPolyExt offset:0 atIndex:1];
             [enc setBuffer:p->bufRootsFwd offset:0 atIndex:2];
             [enc dispatchThreadgroups:MTLSizeMake(kPhaseATerms, batch, 1)
                 threadsPerThreadgroup:MTLSizeMake(kCirculantSize, 1, 1)];
+
+            // 5a. phase A scalar pass: recode, histogram, load-order, sort
+            [enc setComputePipelineState:p->psoPhaseASort];
+            [enc setBuffer:p->bufItems offset:0 atIndex:0];
+            [enc setBuffer:p->bufStarts offset:0 atIndex:1];
+            [enc setBuffer:p->bufPerm offset:0 atIndex:2];
+            [enc setBuffer:p->bufCoeffs offset:0 atIndex:3];
+            [enc dispatchThreadgroups:MTLSizeMake(kCirculantSize, batch, 1)
+                threadsPerThreadgroup:MTLSizeMake(kPhaseATerms, 1, 1)];
+
+            // 5b. phase A curve pass: fixed-base bucket MSM
+            [enc setComputePipelineState:p->psoPhaseA];
+            [enc setBuffer:p->bufBuckets offset:0 atIndex:0];
+            [enc setBuffer:p->bufItems offset:0 atIndex:1];
+            [enc setBuffer:p->bufStarts offset:0 atIndex:2];
+            [enc setBuffer:p->bufPerm offset:0 atIndex:3];
+            [enc setBuffer:p->bufTable offset:0 atIndex:4];
+            [enc dispatchThreadgroups:MTLSizeMake(kCirculantSize, batch, 1)
+                threadsPerThreadgroup:MTLSizeMake(kNumBuckets, 1, 1)];
+
+            stage(&st.phase_a);
+            encodeReduce(enc, p, p->bufPoints, kCirculantSize, batch);
+            stage(&st.reduce_a);
+
+            // 6. doubling ladder over u[j], then to affine for the mixed adds
+            [enc setComputePipelineState:p->psoLadder];
+            [enc setBuffer:p->bufLadderJac offset:0 atIndex:0];
+            [enc setBuffer:p->bufPoints offset:0 atIndex:1];
+            [enc dispatchThreads:MTLSizeMake(kCirculantSize, batch, 1)
+                threadsPerThreadgroup:MTLSizeMake(8, 1, 1)];
+
+            stage(&st.ladder);
+
+            const uint32_t ladderPoints = (uint32_t)batch * kCirculantSize * kLadderPositions;
+            encodeNormalize(enc, p, p->bufLadderAff, p->bufLadderJac, ladderPoints,
+                            inversionChunk(ladderPoints, 32, 128, 4096));
+            stage(&st.normalize_ladder);
+
+            // 7. phase B: the fused circulant map
+            [enc setComputePipelineState:p->psoPhaseB];
+            [enc setBuffer:p->bufBuckets offset:0 atIndex:0];
+            [enc setBuffer:p->bufLadderAff offset:0 atIndex:1];
+            [enc setBuffer:p->bufKernelItems offset:0 atIndex:2];
+            [enc setBuffer:p->bufKernelOffsets offset:0 atIndex:3];
+            [enc setBuffer:p->bufKernelPerm offset:0 atIndex:4];
+            [enc dispatchThreadgroups:MTLSizeMake(kCirculantSize, batch, 1)
+                threadsPerThreadgroup:MTLSizeMake(kNumBuckets, 1, 1)];
+
+            stage(&st.phase_b);
+            encodeReduce(enc, p, p->bufProofs, kCirculantSize, batch);
+            stage(&st.reduce_b);
+
+            // 8. proofs -> affine -> compressed bytes
+            const uint32_t proofPoints = (uint32_t)batch * kCirculantSize;
+            encodeNormalize(enc, p, p->bufProofsAff, p->bufProofs, proofPoints,
+                            inversionChunk(proofPoints, 4, 32, 1024));
+            stage(&st.normalize_proofs);
+
+            [enc setComputePipelineState:p->psoCompress];
+            [enc setBuffer:p->bufProofBytes offset:0 atIndex:0];
+            [enc setBuffer:p->bufProofsAff offset:0 atIndex:1];
+            [enc dispatchThreads:MTLSizeMake(kCirculantSize, batch, 1)
+                threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+            stage(&st.compress);
         }
 
         [enc endEncoding];
-        [cb1 commit];
-        [cb1 waitUntilCompleted];
-        if (cb1.error) {
-            NSLog(@"kzgpu: command buffer 1 failed: %@", cb1.error);
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.error || failed) {
+            NSLog(@"kzgpu: command buffer failed: %@", cb.error);
             return KZGPU_ERR_GPU;
         }
         if (*(uint32_t *)p->bufErr.contents != 0) return KZGPU_ERR_INVALID_BLOB;
-        st.scalar_stage = nowMs() - tStart;
 
         if (cells) {
             memcpy(cells, p->bufCells.contents, (size_t)batch * kFieldElementsPerExtBlob * 32);
         }
-        if (!proofs) {
-            st.total = nowMs() - tStart;
-            return KZGPU_OK;
+        if (proofs) {
+            memcpy(proofs, p->bufProofBytes.contents,
+                   (size_t)batch * kCirculantSize * kBytesPerProof);
         }
-
-        const double tPhaseA = nowMs();
-        const int splitA = p->pool ? p->splitA : kCirculantSize;
-        const int splitB = p->pool ? p->splitB : kCirculantSize;
-
-        // ---- pass 2: phase A.  The GPU takes outputs [0, splitA); the CPU
-        // pool takes the rest and runs while the command buffer is in flight.
-        id<MTLCommandBuffer> cb2 = [p->queue commandBuffer];
-        {
-            id<MTLComputeCommandEncoder> e = [cb2 computeCommandEncoder];
-            [e setComputePipelineState:p->psoPhaseASort];
-            [e setBuffer:p->bufItems offset:0 atIndex:0];
-            [e setBuffer:p->bufStarts offset:0 atIndex:1];
-            [e setBuffer:p->bufPerm offset:0 atIndex:2];
-            [e setBuffer:p->bufCoeffs offset:0 atIndex:3];
-            [e dispatchThreadgroups:MTLSizeMake(splitA, batch, 1)
-                threadsPerThreadgroup:MTLSizeMake(kPhaseATerms, 1, 1)];
-
-            [e setComputePipelineState:p->psoPhaseA];
-            [e setBuffer:p->bufBuckets offset:0 atIndex:0];
-            [e setBuffer:p->bufItems offset:0 atIndex:1];
-            [e setBuffer:p->bufStarts offset:0 atIndex:2];
-            [e setBuffer:p->bufPerm offset:0 atIndex:3];
-            [e setBuffer:p->bufTable offset:0 atIndex:4];
-            [e dispatchThreadgroups:MTLSizeMake(splitA, batch, 1)
-                threadsPerThreadgroup:MTLSizeMake(kNumBuckets, 1, 1)];
-
-            const uint32_t countA = (uint32_t)splitA;
-            [e setComputePipelineState:p->psoReduce];
-            [e setBuffer:p->bufPoints offset:0 atIndex:0];
-            [e setBuffer:p->bufBuckets offset:0 atIndex:1];
-            [e setBytes:&countA length:4 atIndex:2];
-            [e dispatchThreadgroups:MTLSizeMake(
-                                        (splitA + L_REDUCE_OUTPUTS_PER_TG - 1) /
-                                            L_REDUCE_OUTPUTS_PER_TG,
-                                        batch, 1)
-                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-            [e endEncoding];
-        }
-        [cb2 commit];
-
-        double cpuTimeA = 0;
-        if (p->pool && splitA < kCirculantSize) {
-            const double t0 = nowMs();
-            cpu_phase_a(*p->pool, p->cpuStaging.data(), (const uint32_t *)p->bufCoeffs.contents,
-                        (const uint32_t *)p->bufTable.contents, batch, splitA, kCirculantSize);
-            cpuTimeA = nowMs() - t0;
-        }
-        [cb2 waitUntilCompleted];
-        const double gpuTimeA = (cb2.GPUEndTime - cb2.GPUStartTime) * 1e3;
-        if (cb2.error) {
-            NSLog(@"kzgpu: command buffer 2 failed: %@", cb2.error);
-            return KZGPU_ERR_GPU;
-        }
-        if (p->pool && splitA < kCirculantSize) {
-            copyStagedOutputs(p, p->bufPoints, batch, splitA);
-            rebalance(p->splitA, gpuTimeA, cpuTimeA, splitA, kCirculantSize - splitA, p->gpuCostA,
-                      p->cpuCostA);
-        }
-        st.phase_a = nowMs() - tPhaseA;
-        st.phase_a_gpu = gpuTimeA;
-        st.phase_a_cpu = cpuTimeA;
-        st.split_a = splitA;
-        const double tLadder = nowMs();
-
-        // Phase B needs 2^(8d) * u[j] in affine form.  Both the doubling chain
-        // and the inversion run on the host: 248 sequential doublings over 128
-        // points is latency-bound on a GPU whose single-thread Fp multiply
-        // costs 3.4us (measured 19.6ms there, well under 1ms here).
-        build_ladder_affine(p->pool.get(), (uint32_t *)p->bufLadderAff.contents,
-                            (const uint32_t *)p->bufPoints.contents,
-                            (size_t)batch * kCirculantSize, 0);
-        st.ladder = nowMs() - tLadder;
-
-        const double tPhaseB = nowMs();
-        // ---- pass 3: phase B, split the same way.
-        id<MTLCommandBuffer> cb3 = [p->queue commandBuffer];
-        {
-            id<MTLComputeCommandEncoder> e = [cb3 computeCommandEncoder];
-            [e setComputePipelineState:p->psoPhaseB];
-            [e setBuffer:p->bufBuckets offset:0 atIndex:0];
-            [e setBuffer:p->bufLadderAff offset:0 atIndex:1];
-            [e setBuffer:p->bufKernelItems offset:0 atIndex:2];
-            [e setBuffer:p->bufKernelOffsets offset:0 atIndex:3];
-            [e setBuffer:p->bufKernelPerm offset:0 atIndex:4];
-            [e dispatchThreadgroups:MTLSizeMake(splitB, batch, 1)
-                threadsPerThreadgroup:MTLSizeMake(kNumBuckets, 1, 1)];
-
-            const uint32_t countB = (uint32_t)splitB;
-            [e setComputePipelineState:p->psoReduce];
-            [e setBuffer:p->bufProofs offset:0 atIndex:0];
-            [e setBuffer:p->bufBuckets offset:0 atIndex:1];
-            [e setBytes:&countB length:4 atIndex:2];
-            [e dispatchThreadgroups:MTLSizeMake(
-                                        (splitB + L_REDUCE_OUTPUTS_PER_TG - 1) /
-                                            L_REDUCE_OUTPUTS_PER_TG,
-                                        batch, 1)
-                threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
-            [e endEncoding];
-        }
-        [cb3 commit];
-
-        double cpuTimeB = 0;
-        if (p->pool && splitB < kCirculantSize) {
-            const double t0 = nowMs();
-            cpu_phase_b(*p->pool, p->cpuStaging.data(),
-                        (const uint32_t *)p->bufLadderAff.contents,
-                        (const uint32_t *)p->bufKernelItems.contents,
-                        (const uint32_t *)p->bufKernelOffsets.contents, batch, splitB,
-                        kCirculantSize);
-            cpuTimeB = nowMs() - t0;
-        }
-        [cb3 waitUntilCompleted];
-        const double gpuTimeB = (cb3.GPUEndTime - cb3.GPUStartTime) * 1e3;
-        if (cb3.error) {
-            NSLog(@"kzgpu: command buffer 3 failed: %@", cb3.error);
-            return KZGPU_ERR_GPU;
-        }
-        if (p->pool && splitB < kCirculantSize) {
-            copyStagedOutputs(p, p->bufProofs, batch, splitB);
-            rebalance(p->splitB, gpuTimeB, cpuTimeB, splitB, kCirculantSize - splitB, p->gpuCostB,
-                      p->cpuCostB);
-        }
-        st.phase_b = nowMs() - tPhaseB;
-        st.phase_b_gpu = gpuTimeB;
-        st.phase_b_cpu = cpuTimeB;
-        st.split_b = splitB;
-
-        const double tFinal = nowMs();
-        finalize_proofs(p->pool.get(), proofs, (const uint32_t *)p->bufProofs.contents, batch, 0);
-        st.finalize = nowMs() - tFinal;
+        st.gpu_time = (cb.GPUEndTime - cb.GPUStartTime) * 1e3;
         st.total = nowMs() - tStart;
         return KZGPU_OK;
     }
@@ -644,8 +608,7 @@ kzgpu_result kzgpu_compute_cells_and_proofs_batch(kzgpu_prover *p, uint8_t *cell
 //
 // Development helper: computeBatch records what it measured into the prover,
 // and this just runs it and hands the numbers back.  Reporting the real path
-// matters here -- the phases overlap the GPU with the CPU pool, and a separate
-// re-implementation would not show that.
+// matters here rather than a separate re-implementation of the dispatch order.
 #include "kzgpu_profile.h"
 
 namespace kzgpu {
@@ -654,7 +617,7 @@ kzgpu_result profile_batch(kzgpu_prover *p, unsigned char *cells, unsigned char 
                            const unsigned char *blobs, unsigned batch, StageTimes &out) {
     if (!p || !blobs) return KZGPU_ERR_BADARGS;
     std::lock_guard<std::mutex> lock(p->mutex);
-    const kzgpu_result rc = computeBatch(p, cells, proofs, blobs, batch);
+    const kzgpu_result rc = computeBatch(p, cells, proofs, blobs, batch, /*stageSplit=*/true);
     out = p->lastStage;
     return rc;
 }

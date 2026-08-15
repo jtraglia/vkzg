@@ -1,4 +1,6 @@
-// Per-stage timing of the real compute path (development tool).
+// Per-stage GPU timing (development tool).  Runs the real dispatch sequence
+// with the command buffer flushed at stage boundaries, so each figure includes
+// a little submission overhead but attributes time correctly.
 #include "../include/kzgpu.h"
 #include "../src/kzgpu_profile.h"
 
@@ -19,13 +21,11 @@ int main(int argc, char **argv) {
     const char *setup = argc > 1 ? argv[1] : "data/trusted_setup.txt";
     unsigned batch = argc > 2 ? (unsigned)atoi(argv[2]) : 8;
     int reps = argc > 3 ? atoi(argv[3]) : 6;
-    int cpu = argc > 4 ? atoi(argv[4]) : 0;
 
     kzgpu_options o;
     kzgpu_options_default(&o);
     o.table_cache_path = "/tmp/kzgpu_tables_v3.cache";
     o.max_batch_size = batch;
-    o.cpu_assist_threads = cpu;
     kzgpu_prover *p = nullptr;
     if (kzgpu_prover_new_from_file(&p, setup, &o) != KZGPU_OK) { printf("setup failed\n"); return 1; }
 
@@ -37,30 +37,32 @@ int main(int argc, char **argv) {
     bool first = true;
     for (int r = 0; r < reps; r++) {
         kzgpu::StageTimes t;
-        kzgpu::profile_batch(p, cells.data(), proofs.data(), blobs.data(), batch, t);
+        if (kzgpu::profile_batch(p, cells.data(), proofs.data(), blobs.data(), batch, t) != KZGPU_OK) {
+            printf("compute failed\n");
+            return 1;
+        }
         if (first || t.total < best.total) { best = t; first = false; }
     }
 
-    printf("batch = %u, cpu_assist_threads = %d\n", batch, cpu);
-    printf("GPU took %d/128 phase A outputs, %d/128 phase B outputs\n\n", best.split_a, best.split_b);
+    printf("batch = %u   (stage-split; each figure includes ~0.1ms submission)\n\n", batch);
     struct { const char *n; double v; } rows[] = {
         {"scalar stage (NTTs)", best.scalar_stage},
-        {"PHASE A  (wall)", best.phase_a},
-        {"   gpu half", best.phase_a_gpu},
-        {"   cpu half", best.phase_a_cpu},
-        {"ladder (cpu)", best.ladder},
-        {"PHASE B  (wall)", best.phase_b},
-        {"   gpu half", best.phase_b_gpu},
-        {"   cpu half", best.phase_b_cpu},
-        {"finalize (cpu)", best.finalize},
+        {"phase A  (sort + MSM)", best.phase_a},
+        {"  reduce A", best.reduce_a},
+        {"ladder", best.ladder},
+        {"  normalize ladder", best.normalize_ladder},
+        {"phase B  (circulant)", best.phase_b},
+        {"  reduce B", best.reduce_b},
+        {"  normalize proofs", best.normalize_proofs},
+        {"  compress proofs", best.compress},
     };
+    double sum = 0;
     for (auto &r : rows) {
-        const bool sub = r.n[0] == ' ';
-        printf("  %-22s %8.2f ms %s\n", r.n, r.v,
-               sub ? "" : (r.v > 0 ? "" : ""));
-        if (!sub) printf("");
+        printf("  %-24s %8.2f ms  %5.1f%%\n", r.n, r.v, 100.0 * r.v / best.total);
+        sum += r.v;
     }
-    printf("  %-22s %8.2f ms  (%.2f ms/blob)\n", "TOTAL", best.total, best.total / batch);
+    printf("  %-24s %8.2f ms\n", "accounted", sum);
+    printf("  %-24s %8.2f ms  (%.2f ms/blob)\n", "TOTAL (wall)", best.total, best.total / batch);
     kzgpu_prover_free(p);
     return 0;
 }

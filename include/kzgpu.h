@@ -1,6 +1,11 @@
 /*
  * kzgpu -- EIP-7594 cell KZG proof generation on Apple GPUs.
  *
+ * The whole pipeline runs on the GPU: one command buffer per call, with the
+ * host doing nothing but copying blobs in and cells/proofs out.  That is
+ * deliberate -- on a headless node the GPU is idle while the CPU has real work
+ * to do, so spending CPU cycles here would be taking them from something else.
+ *
  * The API is intentionally plain C so that Rust, Go, Java (JNI/Panama) and
  * others can bind to it without a C++ shim.  All functions are thread safe
  * unless stated otherwise; a single `kzgpu_prover` may be shared between
@@ -67,24 +72,6 @@ typedef struct {
      */
     int validate_setup;
 
-    /*
-     * How many CPU worker threads may help the GPU.
-     *
-     * On Apple silicon the integer multiplier is the bottleneck for BLS12-381,
-     * and the GPU's is comparatively weak: a 32x32->64 multiply issues about
-     * every 8.9 cycles per lane, so the whole 8-core M1 GPU reaches roughly the
-     * same field-multiply throughput as its CPU cores.  Both MSM phases split
-     * their 128 independent outputs between GPU and CPU and run them
-     * concurrently, which is worth about 1.5x over GPU-only.
-     *
-     *   -1  disable, use the GPU alone
-     *    0  auto (default): hardware_concurrency() - 1
-     *   >0  use exactly this many worker threads
-     *
-     * Set this to -1, or to a small number, if the calling process needs its
-     * cores for other work.
-     */
-    int32_t cpu_assist_threads;
 
     /*
      * Number of blobs the prover should be able to have in flight.  Larger
