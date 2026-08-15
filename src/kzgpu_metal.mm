@@ -523,7 +523,7 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
 
             const uint32_t ladderPoints = (uint32_t)batch * kCirculantSize * kLadderPositions;
             encodeNormalize(enc, p, p->bufLadderAff, p->bufLadderJac, ladderPoints,
-                            inversionChunk(ladderPoints, 32, 128, 4096));
+                            inversionChunk(ladderPoints, 32, 128, 8192));
             stage(&st.normalize_ladder);
 
             // 7. phase B: the fused circulant map
@@ -543,7 +543,7 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
             // 8. proofs -> affine -> compressed bytes
             const uint32_t proofPoints = (uint32_t)batch * kCirculantSize;
             encodeNormalize(enc, p, p->bufProofsAff, p->bufProofs, proofPoints,
-                            inversionChunk(proofPoints, 4, 32, 1024));
+                            inversionChunk(proofPoints, 4, 32, 2048));
             stage(&st.normalize_proofs);
 
             [enc setComputePipelineState:p->psoCompress];

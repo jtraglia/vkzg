@@ -232,6 +232,35 @@ three are back on the device:
 
 The result is one command buffer with no host synchronisation inside it.
 
+## Checking the tuning on your own GPU
+
+Everything above was tuned on an 8-core M1, so on a larger part it is worth
+confirming rather than trusting. Two tools:
+
+```sh
+./build/bench_kzgpu data/trusted_setup.txt 10 128   # batch sweep, blobs/s
+./build/profile_stages data/trusted_setup.txt 64 6  # per-stage GPU breakdown
+```
+
+`profile_stages` re-runs the real dispatch sequence with the command buffer
+flushed at stage boundaries. What to look for on a bigger GPU:
+
+- **`phase A` and `phase B` should dominate** (they were ~70% here). If they do,
+  the machine is being used well and the remaining levers are algorithmic.
+- **`ladder` growing as a share** means the batch is too small: it is 128
+  independent chains per blob, so it needs `batch × 128` to reach saturation.
+  Raise the batch before anything else.
+- **`normalize ladder` growing** means the inversion chunking is off for that
+  core count; `inversionChunk`'s target thread count in `src/kzgpu_metal.mm` is
+  the knob.
+- **`reduce A`/`reduce B` growing** points at `L_REDUCE_LANES` in
+  `src/layout_defs.h` (8 here): more lanes give more threads at the cost of
+  wasted SIMD width in the tree.
+
+The MSM window (`L_WINDOW_BITS`, 8) sets the whole shape — digits, buckets and
+the 24 MiB table — and was optimal by a clear margin on this part; it is
+unlikely to want changing.
+
 ## Layout
 
 ```
