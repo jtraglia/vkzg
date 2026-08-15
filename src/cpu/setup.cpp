@@ -166,6 +166,10 @@ void compute_circulant_kernel(Fr kappa[kCirculantSize]) {
     }
 }
 
+uint64_t compute_setup_digest(const uint8_t *g1_monomial_bytes, size_t len) {
+    return fnv1a(g1_monomial_bytes, len);
+}
+
 kzgpu_result read_trusted_setup_file(const std::string &path, std::vector<uint8_t> &g1_monomial) {
     FILE *f = fopen(path.c_str(), "r");
     if (!f) return KZGPU_ERR_IO;
@@ -211,7 +215,7 @@ kzgpu_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bo
     if (!g1_monomial_bytes || len != (size_t)KZGPU_NUM_SETUP_G1_POINTS * KZGPU_BYTES_PER_G1) {
         return KZGPU_ERR_BADARGS;
     }
-    out.setup_digest = fnv1a(g1_monomial_bytes, len);
+    out.setup_digest = compute_setup_digest(g1_monomial_bytes, len);
 
     // ------------------------------------------------------------- decompress
     std::vector<G1Affine> setup_affine(kFieldElementsPerBlob);

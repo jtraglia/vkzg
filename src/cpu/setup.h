@@ -38,6 +38,9 @@ struct SetupTables {
     uint64_t setup_digest = 0;
 };
 
+// Digest of the trusted setup bytes, used to validate the on-disk table cache.
+uint64_t compute_setup_digest(const uint8_t *g1_monomial_bytes, size_t len);
+
 // Parses the standard trusted_setup.txt layout and returns just the monomial
 // G1 section (4096 compressed points).
 kzgpu_result read_trusted_setup_file(const std::string &path, std::vector<uint8_t> &g1_monomial);
