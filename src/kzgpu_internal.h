@@ -55,7 +55,7 @@ constexpr int kPositionTablePoints = kCirculantSize * kPhaseATerms * kNumDigits;
 constexpr size_t kPositionTableWords = (size_t)kPositionTablePoints * kAffineWords;
 
 // Bump when the on-disk cache layout changes.
-constexpr uint32_t kTableCacheVersion = 3;
+constexpr uint32_t kTableCacheVersion = 4;
 constexpr uint32_t kTableCacheMagic = 0x475A4B50; // "PKZG"
 
 } // namespace kzgpu

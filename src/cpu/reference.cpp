@@ -143,7 +143,8 @@ void phase_b_circulant(G1 *out, const G1 *u, const SetupTables &tables) {
         G1 buckets[kNumBuckets];
         for (int k = 0; k < kNumBuckets; k++) buckets[k] = kG1Identity;
 
-        for (int k = 0; k < kNumBuckets; k++) {
+        for (int kk = 0; kk < kNumBuckets; kk++) {
+            const int k = (int)tables.kernel_perm[kk];
             const uint32_t lo = tables.kernel_offsets[k];
             const uint32_t hi = tables.kernel_offsets[k + 1];
             for (uint32_t it = lo; it < hi; it++) {

@@ -29,6 +29,10 @@ struct SetupTables {
     // index, so this is built once here rather than per dispatch.
     std::vector<uint32_t> kernel_items;   // kPhaseBItems entries
     std::vector<uint32_t> kernel_offsets; // kNumBuckets + 1 entries
+    // Lane -> bucket, ordered by descending item count.  A SIMD group runs
+    // until its slowest lane finishes, so handing the heavy buckets to one
+    // group instead of spreading them across all four is worth ~1.3x.
+    std::vector<uint32_t> kernel_perm; // kNumBuckets entries
 
     // 1/8192 and 1/4096 in Montgomery form, for the inverse transforms.
     uint32_t inv_ext_blob[kFrLimbs];

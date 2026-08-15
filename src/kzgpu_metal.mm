@@ -63,6 +63,7 @@ struct kzgpu_prover {
     id<MTLBuffer> bufRootsInv = nil;
     id<MTLBuffer> bufKernelItems = nil;
     id<MTLBuffer> bufKernelOffsets = nil;
+    id<MTLBuffer> bufKernelPerm = nil;
 
     // Per-batch working set.
     id<MTLBuffer> bufBlob = nil;
@@ -221,6 +222,8 @@ kzgpu_result createProver(kzgpu_prover **out, SetupTables &tables, const kzgpu_o
         makeBufferFrom(p->device, tables.kernel_items.data(), tables.kernel_items.size() * 4);
     p->bufKernelOffsets =
         makeBufferFrom(p->device, tables.kernel_offsets.data(), tables.kernel_offsets.size() * 4);
+    p->bufKernelPerm =
+        makeBufferFrom(p->device, tables.kernel_perm.data(), tables.kernel_perm.size() * 4);
     memcpy(p->invBlob, tables.inv_blob, sizeof(p->invBlob));
     memcpy(p->invExtBlob, tables.inv_ext_blob, sizeof(p->invExtBlob));
 
@@ -423,6 +426,7 @@ kzgpu_result computeBatch(kzgpu_prover *p, uint8_t *cells, uint8_t *proofs, cons
         [enc2 setBuffer:p->bufLadderAff offset:0 atIndex:1];
         [enc2 setBuffer:p->bufKernelItems offset:0 atIndex:2];
         [enc2 setBuffer:p->bufKernelOffsets offset:0 atIndex:3];
+        [enc2 setBuffer:p->bufKernelPerm offset:0 atIndex:4];
         [enc2 dispatchThreadgroups:MTLSizeMake(kCirculantSize, batch, 1)
              threadsPerThreadgroup:MTLSizeMake(kNumBuckets, 1, 1)];
 
@@ -577,6 +581,7 @@ kzgpu_result profile_batch(kzgpu_prover *p, unsigned char *cells, unsigned char 
                 [enc setBuffer:p->bufLadderAff offset:0 atIndex:1];
                 [enc setBuffer:p->bufKernelItems offset:0 atIndex:2];
                 [enc setBuffer:p->bufKernelOffsets offset:0 atIndex:3];
+                [enc setBuffer:p->bufKernelPerm offset:0 atIndex:4];
                 [enc dispatchThreadgroups:MTLSizeMake(kCirculantSize, batch, 1)
                     threadsPerThreadgroup:MTLSizeMake(kNumBuckets, 1, 1)];
             });

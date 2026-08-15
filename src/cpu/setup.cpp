@@ -345,6 +345,13 @@ kzgpu_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bo
             acc += counts[k];
         }
         out.kernel_offsets[kNumBuckets] = acc;
+
+        std::vector<uint32_t> order(kNumBuckets);
+        for (int k = 0; k < kNumBuckets; k++) order[k] = (uint32_t)k;
+        std::stable_sort(order.begin(), order.end(), [&](uint32_t x, uint32_t y) {
+            return counts[x] > counts[y];
+        });
+        out.kernel_perm = order;
     }
 
     return KZGPU_OK;
@@ -361,6 +368,7 @@ struct CacheHeader {
     uint64_t roots_words;
     uint64_t kernel_items;
     uint64_t kernel_offsets;
+    uint64_t kernel_perm;
 };
 
 bool read_exact(FILE *f, void *p, size_t n) { return fread(p, 1, n, f) == n; }
@@ -383,11 +391,13 @@ kzgpu_result load_table_cache(const std::string &path, uint64_t expected_digest,
     out.roots_inv.resize(h.roots_words);
     out.kernel_items.resize(h.kernel_items);
     out.kernel_offsets.resize(h.kernel_offsets);
+    out.kernel_perm.resize(h.kernel_perm);
     if (!read_exact(f, out.position_table.data(), h.position_words * 4) ||
         !read_exact(f, out.roots_fwd.data(), h.roots_words * 4) ||
         !read_exact(f, out.roots_inv.data(), h.roots_words * 4) ||
         !read_exact(f, out.kernel_items.data(), h.kernel_items * 4) ||
         !read_exact(f, out.kernel_offsets.data(), h.kernel_offsets * 4) ||
+        !read_exact(f, out.kernel_perm.data(), h.kernel_perm * 4) ||
         !read_exact(f, out.inv_ext_blob, sizeof(out.inv_ext_blob)) ||
         !read_exact(f, out.inv_blob, sizeof(out.inv_blob))) {
         goto done;
@@ -410,12 +420,14 @@ kzgpu_result save_table_cache(const std::string &path, const SetupTables &in) {
     h.roots_words = in.roots_fwd.size();
     h.kernel_items = in.kernel_items.size();
     h.kernel_offsets = in.kernel_offsets.size();
+    h.kernel_perm = in.kernel_perm.size();
     bool ok = write_exact(f, &h, sizeof(h)) &&
               write_exact(f, in.position_table.data(), in.position_table.size() * 4) &&
               write_exact(f, in.roots_fwd.data(), in.roots_fwd.size() * 4) &&
               write_exact(f, in.roots_inv.data(), in.roots_inv.size() * 4) &&
               write_exact(f, in.kernel_items.data(), in.kernel_items.size() * 4) &&
               write_exact(f, in.kernel_offsets.data(), in.kernel_offsets.size() * 4) &&
+              write_exact(f, in.kernel_perm.data(), in.kernel_perm.size() * 4) &&
               write_exact(f, in.inv_ext_blob, sizeof(in.inv_ext_blob)) &&
               write_exact(f, in.inv_blob, sizeof(in.inv_blob));
     fclose(f);

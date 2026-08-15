@@ -236,6 +236,8 @@ kernel void k_phase_a(device uint *out [[buffer(0)]], device const uint *coeffs 
     threadgroup ushort tg_sorted[L_PHASE_A_ITEMS];
     threadgroup atomic_uint tg_count[L_NUM_BUCKETS];
     threadgroup uint tg_start[L_NUM_BUCKETS + 1];
+    threadgroup uchar tg_perm[L_NUM_BUCKETS];
+    threadgroup uint tg_hist[L_LOAD_CLASSES];
 
     const uint j = tgid.x;
     const uint b = tgid.y;
@@ -278,6 +280,31 @@ kernel void k_phase_a(device uint *out [[buffer(0)]], device const uint *coeffs 
             atomic_store_explicit(&tg_count[k], tg_start[k], memory_order_relaxed);
         }
         tg_start[L_NUM_BUCKETS] = acc;
+
+        // Order the buckets by descending load before handing them to lanes.
+        //
+        // A SIMD group runs until its slowest lane is done, so with a random
+        // assignment all four groups pay the global maximum (measured 24.8
+        // against a mean of 15.9).  Sorting first means only the first group
+        // sees the heavy tail and the rest finish near their own means, which
+        // is worth about 1.3x on the accumulation for a 200-iteration integer
+        // sort.  Counting sort on the load, clamped into L_LOAD_CLASSES bins.
+        for (uint c = 0u; c < L_LOAD_CLASSES; c++) tg_hist[c] = 0u;
+        for (uint k = 0u; k < L_NUM_BUCKETS; k++) {
+            uint n = tg_start[k + 1u] - tg_start[k];
+            tg_hist[min(n, (uint)L_LOAD_CLASSES - 1u)]++;
+        }
+        uint pos = 0u; // walk classes from heaviest to lightest
+        for (uint c = L_LOAD_CLASSES; c-- > 0u;) {
+            const uint n = tg_hist[c];
+            tg_hist[c] = pos;
+            pos += n;
+            if (c == 0u) break;
+        }
+        for (uint k = 0u; k < L_NUM_BUCKETS; k++) {
+            uint n = tg_start[k + 1u] - tg_start[k];
+            tg_perm[tg_hist[min(n, (uint)L_LOAD_CLASSES - 1u)]++] = (uchar)k;
+        }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -305,9 +332,10 @@ kernel void k_phase_a(device uint *out [[buffer(0)]], device const uint *coeffs 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     G1 acc = g1_identity();
+    const uint bucket = (uint)tg_perm[tid];
     {
-        const uint lo = tg_start[tid];
-        const uint hi = tg_start[tid + 1u];
+        const uint lo = tg_start[bucket];
+        const uint hi = tg_start[bucket + 1u];
         device const uint *tbase =
             table + (ulong)j * L_PHASE_A_TERMS * L_NUM_DIGITS * L_AFFINE_WORDS;
         for (uint it = lo; it < hi; it++) {
@@ -320,8 +348,9 @@ kernel void k_phase_a(device uint *out [[buffer(0)]], device const uint *coeffs 
         }
     }
 
-    g1_store(out + ((ulong)b * L_CIRCULANT_SIZE * L_NUM_BUCKETS + (ulong)j * L_NUM_BUCKETS + tid) *
-                       L_JACOBIAN_WORDS,
+    g1_store(out +
+                 ((ulong)b * L_CIRCULANT_SIZE * L_NUM_BUCKETS + (ulong)j * L_NUM_BUCKETS + bucket) *
+                     L_JACOBIAN_WORDS,
              acc);
 }
 
@@ -335,13 +364,17 @@ kernel void k_phase_a(device uint *out [[buffer(0)]], device const uint *coeffs 
 kernel void k_phase_b(device uint *out [[buffer(0)]], device const uint *ladder [[buffer(1)]],
                       device const uint *items [[buffer(2)]],
                       device const uint *offsets [[buffer(3)]],
+                      device const uint *perm [[buffer(4)]],
                       uint2 tgid [[threadgroup_position_in_grid]],
                       uint2 tid2 [[thread_position_in_threadgroup]]) {
     const uint tid = tid2.x;
     const uint a = tgid.x;
     const uint b = tgid.y;
-    const uint lo = offsets[tid];
-    const uint hi = offsets[tid + 1u];
+    // Same load-ordering trick as phase A, except the taps are fixed so the
+    // permutation is computed once on the host.
+    const uint bucket = perm[tid];
+    const uint lo = offsets[bucket];
+    const uint hi = offsets[bucket + 1u];
     device const uint *lbase =
         ladder + (ulong)b * L_CIRCULANT_SIZE * L_LADDER_POSITIONS * L_AFFINE_WORDS;
 
@@ -357,8 +390,9 @@ kernel void k_phase_b(device uint *out [[buffer(0)]], device const uint *ladder 
         acc = g1_madd(acc, pt);
     }
 
-    g1_store(out + ((ulong)b * L_CIRCULANT_SIZE * L_NUM_BUCKETS + (ulong)a * L_NUM_BUCKETS + tid) *
-                       L_JACOBIAN_WORDS,
+    g1_store(out +
+                 ((ulong)b * L_CIRCULANT_SIZE * L_NUM_BUCKETS + (ulong)a * L_NUM_BUCKETS + bucket) *
+                     L_JACOBIAN_WORDS,
              acc);
 }
 
