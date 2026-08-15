@@ -50,14 +50,20 @@ using namespace metal;
 
 /*
  * Bucket reduction: L_REDUCE_LANES lanes cooperate on one output, each first
- * collapsing L_NUM_BUCKETS / L_REDUCE_LANES buckets serially.  8 lanes keeps
- * the shuffle-tree width small while leaving the serial chain short enough.
+ * collapsing L_NUM_BUCKETS / L_REDUCE_LANES buckets serially, then a shuffle
+ * tree across the lanes.
+ *
+ * Fewer lanes wins once there are enough threads to fill the GPU, because the
+ * tree executes at full SIMD width on every level however few lanes are
+ * actually merging.  Measured at batch 64, interleaved to cancel thermal
+ * drift: 4 lanes 46.1 ms/blob, 8 lanes 48.0, 16 lanes 53.4, 32 lanes 71.8.
+ * Below 4 the serial chain starts to dominate (2 lanes 48.3, 1 lane 49.6).
  */
 #define L_LOAD_CLASSES 64 /* counting-sort bins for the bucket load ordering */
 
-#define L_REDUCE_LANES 8
-#define L_LOG_REDUCE_PER_LANE 4
-#define L_REDUCE_OUTPUTS_PER_TG 16 /* 128 threads / L_REDUCE_LANES */
+#define L_REDUCE_LANES 4
+#define L_LOG_REDUCE_PER_LANE 5
+#define L_REDUCE_OUTPUTS_PER_TG 32 /* 128 threads / L_REDUCE_LANES */
 
 #endif /* KZGPU_LAYOUT_DEFS_H */
 
