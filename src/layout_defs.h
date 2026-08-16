@@ -115,11 +115,29 @@
  * a ~1.7% win that only shows up at batch 64, and it is dramatically better
  * at batch 1. Worth revisiting if the recommended batch range changes, or on
  * a different Vulkan implementation.
+ *
+ * Separately from L_REDUCE_LANES: k_bucket_reduce.comp's workgroup size
+ * (L_REDUCE_OUTPUTS_PER_TG * L_REDUCE_LANES threads) went from 128 down to
+ * 32 -- the smallest that still holds a full subgroup, since a team's
+ * shuffles must stay inside one 32-wide subgroup -- after an M1 Ultra
+ * measured this stage 2x *slower* than the 8-core M1 at batch 1 despite
+ * being the same GPU family with 8x the cores. The cause wasn't thread
+ * count or lane count, it was *workgroup* count: at batch 1 there were only
+ * 4 workgroups total (count=128 outputs / 32 outputs-per-workgroup at the
+ * old size), and a GPU with many more independent compute clusters than
+ * the one this was tuned on can't spread 4 workgroups across itself no
+ * matter how fast each cluster is -- most of the chip idles regardless of
+ * core count. Quartering the workgroup size quadruples the workgroup count
+ * for the same output count, which is what actually lets a bigger GPU help.
+ * Confirmed harmless on the 8-core M1 across the whole batch range (a small
+ * *improvement*, not a tradeoff) before assuming it would also help the
+ * Ultra; k_ladder.comp's workgroup size was dropped 128 -> 32 for the same
+ * reason and with the same on-the-8-core-M1 validation.
  */
 #define L_LOAD_CLASSES 64 /* counting-sort bins for the bucket load ordering */
 
 #define L_REDUCE_LANES 4
 #define L_LOG_REDUCE_PER_LANE 5
-#define L_REDUCE_OUTPUTS_PER_TG 32 /* 128 threads / L_REDUCE_LANES */
+#define L_REDUCE_OUTPUTS_PER_TG 8 /* 32 threads / L_REDUCE_LANES */
 
 #endif /* VULKAN_PROVER_LAYOUT_DEFS_H */

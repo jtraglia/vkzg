@@ -408,6 +408,31 @@ splitting phase B's convolution in two — is its own section, see
   regress the batch ≥ 8 range this library recommends; revisit if that
   recommendation changes, or on a different Vulkan implementation. Full sweep
   in the comment above `L_REDUCE_LANES` in `src/layout_defs.h`.
+- **Small batches starve on a GPU with many cores, and the cause is
+  workgroup count, not core count or thread count.** An M1 Ultra (64 GPU
+  cores) reported `reduce_a`/`reduce_b`/`ladder` running *slower* at batch 1
+  than an 8-core M1, despite being the same GPU family with 8× the cores.
+  Vulkan has no portable way to query GPU core or cluster count (unlike
+  `std::thread::hardware_concurrency()` for CPUs, and unlike Metal, which at
+  least exposes `recommendedMaxWorkingSetSize`-adjacent hints); device-name
+  string matching would be fragile and Apple-specific for a library that
+  targets any Vulkan 1.2 device. But the actual lever is measurable and
+  portable: workgroup *count*. `k_bucket_reduce.comp` and `k_ladder.comp`
+  both had a workgroup cover a whole blob's worth of output (128 threads),
+  so at batch 1 they dispatched only a handful of workgroups total — too few
+  to spread across a GPU with many independent compute clusters, no matter
+  how fast each cluster is. Narrowing both to `local_size_x = 32` (the
+  smallest that still holds a full subgroup, since `k_bucket_reduce.comp`'s
+  shuffles must stay inside one) quarters the per-workgroup work and
+  quadruples the workgroup count for the same total output, at no
+  correctness cost (each thread's work was already fully independent).
+  Validated clean — a small further improvement, not a tradeoff — across the
+  whole batch range on the 8-core M1; not yet independently confirmed on the
+  Ultra. If a genuine cross-hardware tradeoff ever does turn up (as
+  `L_REDUCE_LANES` already is, just not across different GPUs yet),
+  self-calibrating at prover-creation time by benchmarking candidate
+  dispatch shapes would be the principled fix — more robust than hard-coding
+  per-device constants, which this library deliberately avoids.
 
 Still open, in roughly the order worth checking next:
 
@@ -421,12 +446,13 @@ Still open, in roughly the order worth checking next:
   Metal's automatic hazard tracking would have inferred. Narrowing these to
   only the buffers each stage actually depends on is unexplored.
 - **Other kernels' workgroup sizes** (`k_phase_a_sort.comp` at 64,
-  `k_build_circulant.comp`/`k_phase_a.comp`/`k_phase_b_split.comp`/
-  `k_bucket_reduce.comp` at 128) inherited Metal's threadgroup sizes the same
-  way the ladder did; only the ladder has been checked for the same
-  small-workgroup effect so far, and it's the one with by far the smallest
-  original size (8) so the others may simply not have room to improve the
-  same way.
+  `k_build_circulant.comp`/`k_phase_a.comp`/`k_phase_b_split.comp` at 128)
+  still inherit Metal's threadgroup sizes; only the ladder and
+  `k_bucket_reduce.comp` have been narrowed for the workgroup-count effect
+  above so far. Those two dispatch a fixed 128 workgroups per blob
+  regardless of batch size (one per output point), so the same starvation
+  wouldn't apply the same way — but that assumption hasn't been checked by
+  actually measuring them on a many-cluster GPU.
 
 The MSM window (`L_WINDOW_BITS`, 8) sets the whole shape — digits, buckets and
 the 24 MiB table — and was optimal by a clear margin on Metal; it is a

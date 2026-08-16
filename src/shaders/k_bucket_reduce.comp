@@ -1,10 +1,21 @@
-// One subgroup serves L_REDUCE_LANES-sized teams; a 128-thread workgroup
-// therefore reduces 16 outputs at once with no shared memory at all.
+// One subgroup serves L_REDUCE_LANES-sized teams; a 32-thread workgroup
+// therefore reduces 8 outputs at once with no shared memory at all.
+//
+// local_size_x is 32 (one workgroup per subgroup) rather than 128: at 128,
+// batch 1 (count=128) dispatches only 8 workgroups total, too few to
+// spread across a GPU with many independent compute clusters (an M1 Ultra
+// measured this stage slower than an 8-core M1 at batch 1, despite having
+// 8x the cores). 32-wide is the narrowest workgroup that still holds a
+// full subgroup -- shuffles in reduce_buckets must stay inside one
+// subgroup -- and it quadruples the workgroup count for the same output
+// count, which is what actually lets a bigger GPU help. Confirmed harmless
+// on the 8-core M1 across the whole batch range before assuming it would
+// also help the Ultra.
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #include "field.glsl.inc"
 
-layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant, std430) uniform PC {
     uint64_t outAddr;
@@ -19,7 +30,7 @@ void main() {
     const uint tid = gl_LocalInvocationID.x;
     const uint team = tid / L_REDUCE_LANES;
     const uint pos = tid % L_REDUCE_LANES;
-    // `count` need not be a multiple of the 16 outputs a workgroup covers.
+    // `count` need not be a multiple of the 8 outputs a workgroup covers.
     // Teams past the end are clamped onto the last valid output rather than
     // returning early: reduce_buckets exchanges points with subgroup
     // shuffles, and those require every lane in the group to participate.

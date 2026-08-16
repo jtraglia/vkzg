@@ -796,7 +796,7 @@ vkp_result computeBatch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs, ui
     // outweighing the saved dispatch.
     {
         struct { uint64_t ladderAddr, uAddr; } pc{p->bufLadderJac.addr, p->bufPoints.addr};
-        dispatch(cmd, p->psoLadder, p->pipelineLayout, pc, kCirculantSize / 128, batch);
+        dispatch(cmd, p->psoLadder, p->pipelineLayout, pc, kCirculantSize / 32, batch);
     }
     flush(&st.ladder);
 
