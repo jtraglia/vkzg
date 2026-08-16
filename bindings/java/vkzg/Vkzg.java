@@ -12,12 +12,10 @@ import java.lang.invoke.MethodHandle;
  * Java bindings for vkzg (EIP-7594 cell KZG proof generation on the GPU),
  * via the JDK's Foreign Function &amp; Memory API -- no JNI glue code needed.
  *
- * Shaped like c-kzg-4844's Java bindings (jc-kzg-4844): a global GPU prover
- * opened once with {@link #init()} and closed with {@link #deinit()}, plain
- * {@code byte[]} in and out. vkzg only produces cell proofs (not cells, not
- * verification), and its whole point is GPU throughput, so
- * {@link #computeCellKzgProofs(byte[], long)} takes a batch of blobs in one
- * call rather than one blob at a time.
+ * A global GPU prover is opened once with {@link #init()} and closed with
+ * {@link #deinit()}; {@link #computeCellKzgProofs(byte[], long)} takes a
+ * batch of blobs in one call, since batching for GPU throughput is the
+ * whole point.
  *
  * Needs a shared library: build the C library with -DBUILD_SHARED_LIBS=ON
  * and either put it on java.library.path or point -Dvkzg.library.path at
