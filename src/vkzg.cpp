@@ -4,11 +4,9 @@
 // address) via push constants rather than descriptor sets. Every buffer is
 // HOST_VISIBLE | HOST_COHERENT and persistently mapped.
 #include "vkzg.h"
-#include "cpu/bls12_381.h"
-#include "cpu/setup.h"
 #include "gpu_topology.h"
 #include "internal.h"
-#include "setup_data.h"
+#include "precomputed_tables.h"
 #include "profile.h"
 #include "shaders/shader_source.h"
 
@@ -160,8 +158,6 @@ const char *vkzg_error_string(vkzg_result r) {
 
 void vkzg_options_default(vkzg_options *opts) {
     if (!opts) return;
-    opts->table_cache_path = nullptr;
-    opts->validate_setup = 0;
     opts->max_batch_size = 0;
 }
 
@@ -516,7 +512,7 @@ vkzg_result buildPipelines(vkzg_prover *p) {
     return VKZG_OK;
 }
 
-vkzg_result createProver(vkzg_prover **out, SetupTables &tables, const vkzg_options *opts) {
+vkzg_result createProver(vkzg_prover **out, PrecomputedTables &tables, const vkzg_options *opts) {
     auto *p = new vkzg_prover();
 
     VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
@@ -633,33 +629,15 @@ vkzg_result createProver(vkzg_prover **out, SetupTables &tables, const vkzg_opti
 
 // --------------------------------------------------------------- constructors
 
-vkzg_result vkzg_prover_new(vkzg_prover **out, const uint8_t *g1_monomial_bytes,
-                              size_t g1_monomial_len, const vkzg_options *opts) {
-    if (!out || !g1_monomial_bytes) return VKZG_ERR_BADARGS;
+vkzg_result vkzg_prover_new(vkzg_prover **out, const vkzg_options *opts) {
+    if (!out) return VKZG_ERR_BADARGS;
     *out = nullptr;
 
-    SetupTables tables;
-    const bool validate = opts && opts->validate_setup;
-    const char *cache = opts ? opts->table_cache_path : nullptr;
-
-    // The cache records the digest of the setup it was derived from; hashing
-    // the input is far cheaper than building the tables just to learn it.
-    bool have = false;
-    if (cache) {
-        const uint64_t digest = compute_setup_digest(g1_monomial_bytes, g1_monomial_len);
-        have = load_table_cache(cache, digest, tables) == VKZG_OK;
-    }
-    if (!have) {
-        vkzg_result rc = build_setup_tables(g1_monomial_bytes, g1_monomial_len, validate, tables);
-        if (rc != VKZG_OK) return rc;
-        if (cache) save_table_cache(cache, tables);
-    }
+    PrecomputedTables tables;
+    vkzg_result rc = load_precomputed_tables(tables);
+    if (rc != VKZG_OK) return rc;
 
     return createProver(out, tables, opts);
-}
-
-vkzg_result vkzg_prover_new_default(vkzg_prover **out, const vkzg_options *opts) {
-    return vkzg_prover_new(out, kEmbeddedSetupG1Monomial, kEmbeddedSetupSize, opts);
 }
 
 void vkzg_prover_free(vkzg_prover *p) { delete p; }

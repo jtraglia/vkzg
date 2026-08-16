@@ -13,6 +13,7 @@ option(VKZG_REGENERATE "Re-run the constant and shader generators at build time"
 
 find_package(Python3 COMPONENTS Interpreter)
 find_package(Vulkan REQUIRED)
+include(GNUInstallDirs)
 
 find_program(GLSLANG_VALIDATOR NAMES glslangValidator)
 if(NOT GLSLANG_VALIDATOR)
@@ -22,7 +23,6 @@ endif()
 # ---------------------------------------------------------------- generated
 # Both generators are deterministic and their outputs are committed, so a
 # checkout without Python still builds; regeneration is just kept honest here.
-set(GEN_HOST_CONSTANTS ${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/bls12_381_constants.h)
 set(GEN_DEV_CONSTANTS  ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/bls12_381_constants.glsl.inc)
 set(GEN_SHADER_SOURCE  ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/shader_source.h)
 
@@ -45,9 +45,9 @@ set(SHADER_COMMON
 
 if(VKZG_REGENERATE AND Python3_Interpreter_FOUND)
     add_custom_command(
-        OUTPUT ${GEN_HOST_CONSTANTS} ${GEN_DEV_CONSTANTS}
+        OUTPUT ${GEN_DEV_CONSTANTS}
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_constants.py
-                ${GEN_HOST_CONSTANTS} ${GEN_DEV_CONSTANTS}
+                ${GEN_DEV_CONSTANTS}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_constants.py
         COMMENT "Generating BLS12-381 constants")
     add_custom_command(
@@ -58,15 +58,32 @@ if(VKZG_REGENERATE AND Python3_Interpreter_FOUND)
                 ${KERNEL_SOURCES}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_shaders.py ${SHADER_COMMON} ${KERNEL_SOURCES}
         COMMENT "Compiling and embedding SPIR-V kernels")
-    add_custom_target(vkzg_generated DEPENDS ${GEN_SHADER_SOURCE} ${GEN_HOST_CONSTANTS})
+    add_custom_target(vkzg_generated DEPENDS ${GEN_SHADER_SOURCE} ${GEN_DEV_CONSTANTS})
 endif()
+
+# ------------------------------------------------------- precomputed tables
+# The mainnet FK20/position tables are precomputed once (see the "how this
+# was generated" note in src/precomputed_tables.cpp) and shipped as a binary
+# blob rather than derived from the trusted setup at runtime. It's tried at a
+# build-tree path first (so tests/bench/example work with no install step)
+# and falls back to the installed path.
+set(TABLES_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/precomputed_tables.bin)
+set(TABLES_BUILD_PATH ${CMAKE_CURRENT_BINARY_DIR}/precomputed_tables.bin)
+set(TABLES_INSTALL_PATH ${CMAKE_INSTALL_FULL_DATADIR}/vkzg/precomputed_tables.bin)
+configure_file(${TABLES_SRC} ${TABLES_BUILD_PATH} COPYONLY)
+# Generated into the build tree, not committed: it bakes in this machine's
+# absolute paths.
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/generated/install_paths.h
+    "#pragma once\n"
+    "#define VKZG_TABLES_PATH_BUILD \"${TABLES_BUILD_PATH}\"\n"
+    "#define VKZG_TABLES_PATH_INSTALL \"${TABLES_INSTALL_PATH}\"\n")
+install(FILES ${TABLES_SRC} DESTINATION ${CMAKE_INSTALL_DATADIR}/vkzg)
 
 # ------------------------------------------------------------------ library
 add_library(vkzg
     src/vkzg.cpp
     src/gpu_topology.cpp
-    src/cpu/bls12_381.cpp
-    src/cpu/setup.cpp
+    src/precomputed_tables.cpp
     src/setup_data.cpp)
 
 if(TARGET vkzg_generated)
@@ -76,7 +93,7 @@ endif()
 target_include_directories(vkzg
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/generated)
 # Vulkan structs are brace-initialized with only sType set (rest zeroed by
 # C++ value-init), which -Wextra otherwise complains about on every field.
 target_compile_options(vkzg PRIVATE -Wall -Wextra -Wno-missing-field-initializers -O3)
@@ -85,30 +102,16 @@ set_target_properties(vkzg PROPERTIES
     PUBLIC_HEADER include/vkzg.h
     VERSION ${PROJECT_VERSION})
 
-# The reference implementation is only needed by tests, so keep it out of the
-# shipped library.
-add_library(vkzg_reference STATIC src/cpu/reference.cpp)
-target_include_directories(vkzg_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_options(vkzg_reference PRIVATE -O3)
-
 # -------------------------------------------------------------------- tests
 if(VKZG_BUILD_TESTS)
     enable_testing()
     add_library(vkzg_vectors STATIC tests/vectors.cpp)
     target_include_directories(vkzg_vectors PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-    add_executable(test_cpu_field tests/test_cpu_field.cpp)
-    target_link_libraries(test_cpu_field PRIVATE vkzg)
-
-    add_executable(test_reference tests/test_reference.cpp)
-    target_link_libraries(test_reference PRIVATE vkzg vkzg_reference vkzg_vectors)
-
     add_executable(test_gpu tests/test_gpu.cpp)
     target_link_libraries(test_gpu PRIVATE vkzg vkzg_vectors)
 
     set(VEC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tests/vectors)
-    add_test(NAME cpu_field COMMAND test_cpu_field)
-    add_test(NAME reference COMMAND test_reference ${VEC_DIR})
     add_test(NAME gpu COMMAND test_gpu ${VEC_DIR})
 endif()
 
@@ -125,7 +128,6 @@ add_executable(example examples/example.c)
 target_link_libraries(example PRIVATE vkzg)
 
 # ------------------------------------------------------------------ install
-include(GNUInstallDirs)
 install(TARGETS vkzg
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}

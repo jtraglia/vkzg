@@ -34,12 +34,11 @@ int main(int argc, char **argv) {
 
     vkzg_options opts;
     vkzg_options_default(&opts);
-    opts.table_cache_path = "/tmp/vkzg_prover_tables_v3.cache";
     opts.max_batch_size = maxBatch;
 
     vkzg_prover *p = nullptr;
     double t0 = now_ms();
-    vkzg_result rc = vkzg_prover_new_default(&p, &opts);
+    vkzg_result rc = vkzg_prover_new(&p, &opts);
     if (rc != VKZG_OK) {
         printf("prover_new failed: %s\n", vkzg_error_string(rc));
         return 1;

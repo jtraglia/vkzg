@@ -28,10 +28,10 @@ vkzg_options_default(&opts);
 opts.max_batch_size = 16;
 
 vkzg_prover *prover;
-vkzg_prover_new_default(&prover, &opts);   /* mainnet trusted setup is compiled in */
+vkzg_prover_new(&prover, &opts);
 
-vkzg_compute_proofs(prover, proofs, blob);              /* one blob */
-vkzg_compute_proofs_batch(prover, proofs, blobs, n);    /* batched, much cheaper per blob */
+vkzg_compute_proofs(prover, proofs, blob);
+vkzg_compute_proofs_batch(prover, proofs, blobs, n);
 ```
 
 The whole API is in [`include/vkzg.h`](include/vkzg.h), plain C, thread-safe.

@@ -1,30 +1,12 @@
 #!/usr/bin/env python3
-"""Generate the BLS12-381 constant tables used by the CPU and GLSL shader code.
+"""Generate the BLS12-381 field constants the GLSL shaders need.
 
-Emitting these from one script keeps the 64-bit host limbs and the 32-bit
-device limbs provably consistent -- they are derived from the same integers.
-
-Usage: python3 tools/gen_constants.py <out_host.h> <out_device.h>
+Usage: python3 tools/gen_constants.py <out_device.h>
 """
 import sys
 
 P = 0x1A0111EA397FE69A4B1BA7B6434BACD764774B84F38512BF6730D2A0F6B0F6241EABFFFEB153FFFFB9FEFFFFFFFFAAAB
 R = 0x73EDA753299D7D483339D80809A1D80553BDA402FFFE5BFEFFFFFFFF00000001  # scalar field modulus
-# BLS12-381 G1 generator (affine, integers)
-GX = 0x17F1D3A73197D7942695638C4FA9AC0FC3688C4F9774B905A14E3A3F171BAC586C55E83FF97A1AEFFB3AF00ADB22C6BB
-GY = 0x08B3F481E3AAA0F1A09E30ED741D8AE4FCF5E095D5D00AF600DB18CB2C04B3EDD03CC744A2888AE40CAA232946C5E7E1
-# Primitive root of unity of the scalar field
-PRIMITIVE_ROOT = 7
-FIELD_ELEMENTS_PER_EXT_BLOB = 8192
-# GLV endomorphism: phi(x, y) = (beta * x, y) = [lambda] (x, y).
-# beta and lambda are the primitive cube roots of unity of Fp and Fr; the two
-# choices have to be *matched*, which we do below by evaluating both on G.
-BETA = None
-LAMBDA = None
-
-
-def inv_mod(a, m):
-    return pow(a, -1, m)
 
 
 def n0(mod, bits):
@@ -41,180 +23,36 @@ def limbs(x, nlimbs, width):
 
 
 def fmt(x, nlimbs, width):
-    sfx = "ULL" if width == 64 else "u"
     w = width // 4
-    return ", ".join(f"0x{v:0{w}x}{sfx}" for v in limbs(x, nlimbs, width))
+    return ", ".join(f"0x{v:0{w}x}u" for v in limbs(x, nlimbs, width))
 
 
 def to_mont(x, mod, bits):
     return (x * (1 << bits)) % mod
 
 
-def find_root_of_unity(order):
-    assert (R - 1) % order == 0
-    root = pow(PRIMITIVE_ROOT, (R - 1) // order, R)
-    assert pow(root, order, R) == 1
-    assert pow(root, order // 2, R) != 1
-    return root
-
-
-def ec_add(p1, p2):
-    """Affine addition on y^2 = x^3 + 4 over Fp; None is the point at infinity."""
-    if p1 is None:
-        return p2
-    if p2 is None:
-        return p1
-    x1, y1 = p1
-    x2, y2 = p2
-    if x1 == x2:
-        if (y1 + y2) % P == 0:
-            return None
-        lam = (3 * x1 * x1) * inv_mod(2 * y1, P) % P
-    else:
-        lam = (y2 - y1) * inv_mod(x2 - x1, P) % P
-    x3 = (lam * lam - x1 - x2) % P
-    return (x3, (lam * (x1 - x3) - y1) % P)
-
-
-def ec_mul(k, pt):
-    acc, base = None, pt
-    while k:
-        if k & 1:
-            acc = ec_add(acc, base)
-        base = ec_add(base, base)
-        k >>= 1
-    return acc
-
-
-def pick_glv_params():
-    """Find the (beta, lambda) pair for which (beta*x, y) == [lambda](x, y)."""
-    betas = sorted(b for b in (pow(g, (P - 1) // 3, P) for g in range(2, 40))
-                   if pow(b, 3, P) == 1 and b != 1)
-    lambdas = sorted(l for l in (pow(g, (R - 1) // 3, R) for g in range(2, 40))
-                     if pow(l, 3, R) == 1 and l != 1)
-    g = (GX, GY)
-    for lam in lambdas:
-        lg = ec_mul(lam, g)
-        for beta in betas:
-            if lg == ((beta * GX) % P, GY):
-                assert (lam * lam + lam + 1) % R == 0
-                return beta, lam
-    raise RuntimeError("no matching (beta, lambda) pair")
-
-
-def glv_basis():
-    """Short basis of the lattice L = {(a,b) : a + b*lambda == 0 mod r}.
-
-    lambda^2 + lambda + 1 == 0 (mod r), and for BLS12-381 that identity holds
-    over the integers as well (lambda = z^2 - 1, r = z^4 - z^2 + 1), so
-    lambda^2 + lambda + 1 == r exactly.  That gives two vectors of norm
-    ~lambda ~ sqrt(r):
-
-        v1 = (lambda, -1)          v2 = (-1, -(lambda + 1))
-
-    and the lattice determinant is exactly -r.
-    """
-    lam = LAMBDA
-    if lam * lam + lam + 1 != R:  # pick the root that is small over Z
-        lam = R - 1 - LAMBDA
-        assert lam * lam + lam + 1 == R, "neither cube root is the short one"
-    v1 = (lam, -1)
-    v2 = (-1, -(lam + 1))
-    for v in (v1, v2):
-        assert (v[0] + v[1] * LAMBDA) % R == 0, "basis vector not in the lattice"
-    assert v1[0] * v2[1] - v1[1] * v2[0] == -R
-    return v1, v2
-
-
-def glv_split(k, v1, v2):
-    """Babai rounding: k == k1 + k2*lambda (mod r) with |k1|, |k2| ~ sqrt(r).
-
-    Mirrors src/cpu/bls12_381.cpp exactly, including the fixed-point reciprocal,
-    so that the bound reported here is the bound the C++ actually achieves.
-    """
-    # Solving c1*v1 + c2*v2 == (k, 0) over Q gives c2 = -k/r, c1 = k*(lam+1)/r.
-    lam = v1[0]
-    mu = ((lam + 1) << 512) // R
-    c1 = (k * mu + (1 << 511)) >> 512
-    c2 = -((k + R // 2) // R)  # 0 or -1 for 0 <= k < r
-    k1 = k - c1 * v1[0] - c2 * v2[0]
-    k2 = -c1 * v1[1] - c2 * v2[1]
-    assert (k1 + k2 * LAMBDA - k) % R == 0
-    return k1, k2
+def glsl_arr(x, nlimbs, width):
+    return f"uint[{nlimbs}]({fmt(x, nlimbs, width)})"
 
 
 def main():
-    global BETA, LAMBDA
-    host_path, dev_path = sys.argv[1], sys.argv[2]
+    dev_path = sys.argv[1]
 
-    BETA, LAMBDA = pick_glv_params()
-    root8192 = find_root_of_unity(FIELD_ELEMENTS_PER_EXT_BLOB)
-    b1, b2 = glv_basis()
-
-    banner = ("/* Generated by tools/gen_constants.py -- do not edit. */\n"
-              "#pragma once\n\n")
-
-    # ---------------------------------------------------------------- host
-    h = [banner]
-    h.append("/* Base field p (381 bits), 6 x 64-bit limbs, little endian. */\n")
-    h.append(f"#define VKZG_FP_P {{ {fmt(P, 6, 64)} }}\n")
-    h.append(f"#define VKZG_FP_N0 0x{n0(P, 64):016x}ULL\n")
-    h.append(f"#define VKZG_FP_R {{ {fmt(to_mont(1, P, 384), 6, 64)} }}\n")
-    h.append(f"#define VKZG_FP_R2 {{ {fmt(to_mont(to_mont(1, P, 384), P, 384), 6, 64)} }}\n")
-    # (p - 3) / 4 : exponent for the square root used in point decompression
-    h.append(f"#define VKZG_FP_P_MINUS_3_DIV_4 {{ {fmt((P - 3) // 4, 6, 64)} }}\n")
-    h.append(f"#define VKZG_FP_P_MINUS_2 {{ {fmt(P - 2, 6, 64)} }}\n")
-    h.append(f"#define VKZG_FP_BETA {{ {fmt(to_mont(BETA, P, 384), 6, 64)} }}\n")
-    h.append("\n/* Scalar field r (255 bits), 4 x 64-bit limbs. */\n")
-    h.append(f"#define VKZG_FR_R_MOD {{ {fmt(R, 4, 64)} }}\n")
-    h.append(f"#define VKZG_FR_N0 0x{n0(R, 64):016x}ULL\n")
-    h.append(f"#define VKZG_FR_ONE {{ {fmt(to_mont(1, R, 256), 4, 64)} }}\n")
-    h.append(f"#define VKZG_FR_R2 {{ {fmt(to_mont(to_mont(1, R, 256), R, 256), 4, 64)} }}\n")
-    h.append(f"#define VKZG_FR_R_MINUS_2 {{ {fmt(R - 2, 4, 64)} }}\n")
-    h.append(f"#define VKZG_FR_ROOT_8192 {{ {fmt(to_mont(root8192, R, 256), 4, 64)} }}\n")
-    # GLV split needs lambda as a plain integer (it is only ~128 bits) and r.
-    h.append("\n/* GLV endomorphism, used by the subgroup check. */\n")
-    h.append(f"#define VKZG_GLV_LAMBDA_INT {{ {fmt(b1[0], 4, 64)} }}\n")
-    open(host_path, "w").write("".join(h))
-
-    # -------------------------------------------------------------- device
-    def glsl_arr(x, nlimbs, width):
-        return f"uint[{nlimbs}]({fmt(x, nlimbs, width)})"
-
-    d = [banner.replace("#pragma once\n\n", "")]
+    d = ["/* Generated by tools/gen_constants.py -- do not edit. */\n"]
     d.append("/* Device-side (GLSL) constants: 32-bit limbs, little endian. */\n")
     d.append("#define FP_NLIMBS 12\n#define FR_NLIMBS 8\n\n")
     d.append(f"const uint FP_P[12] = {glsl_arr(P, 12, 32)};\n")
     d.append(f"const uint FP_N0 = 0x{n0(P, 32):08x}u;\n")
     d.append(f"const uint FP_R[12] = {glsl_arr(to_mont(1, P, 384), 12, 32)};\n")
-    d.append(f"const uint FP_R2[12] = {glsl_arr(to_mont(to_mont(1, P, 384), P, 384), 12, 32)};\n")
-    d.append(f"const uint FP_BETA[12] = {glsl_arr(to_mont(BETA, P, 384), 12, 32)};\n")
     # Exponent for the Fermat inversion, and (p-1)/2 for the compressed-point
     # sign bit.  Both are plain integers, not Montgomery values.
     d.append(f"const uint FP_P_MINUS_2[12] = {glsl_arr(P - 2, 12, 32)};\n")
     d.append(f"const uint FP_P_HALF[12] = {glsl_arr((P - 1) // 2, 12, 32)};\n")
     d.append(f"const uint FR_P[8] = {glsl_arr(R, 8, 32)};\n")
     d.append(f"const uint FR_N0 = 0x{n0(R, 32):08x}u;\n")
-    d.append(f"const uint FR_ONE[8] = {glsl_arr(to_mont(1, R, 256), 8, 32)};\n")
     d.append(f"const uint FR_R2[8] = {glsl_arr(to_mont(to_mont(1, R, 256), R, 256), 8, 32)};\n")
     open(dev_path, "w").write("".join(d))
-
-    # Sanity-check the split on pseudo-random scalars and report the worst case.
-    worst = 0
-    x = 0x123456789ABCDEF
-    for _ in range(4000):
-        x = (x * 6364136223846793005 + 1442695040888963407) & ((1 << 256) - 1)
-        k = x % R
-        k1, k2 = glv_split(k, b1, b2)
-        worst = max(worst, abs(k1).bit_length(), abs(k2).bit_length())
-
-    print(f"wrote {host_path} and {dev_path}")
-    print(f"  beta   = 0x{BETA:096x}")
-    print(f"  lambda = 0x{LAMBDA:064x}")
-    print(f"  root of unity (2^13): 0x{root8192:064x}")
-    print(f"  glv v1 = ({hex(b1[0])}, {b1[1]})")
-    print(f"  glv v2 = ({b2[0]}, {hex(b2[1])})")
-    print(f"  glv split worst-case half-scalar width: {worst} bits")
+    print(f"wrote {dev_path}")
 
 
 if __name__ == "__main__":

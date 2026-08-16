@@ -1,7 +1,6 @@
 /*
  * Minimal end-to-end example: build a prover and compute the 128 cell
- * proofs for one blob.  The mainnet trusted setup is compiled into the
- * library, so there is no file to load and no path to configure.
+ * proofs for one blob.
  *
  * Build:  cmake -B build && cmake --build build
  * Run:    ./build/example
@@ -15,13 +14,10 @@
 int main(void) {
     vkzg_options opts;
     vkzg_options_default(&opts);
-    /* Deriving the FK20 tables from the setup takes about a second; caching
-     * them brings subsequent starts down to ~60ms. */
-    opts.table_cache_path = "/tmp/vkzg_prover_tables.cache";
     opts.max_batch_size = 16;
 
     vkzg_prover *prover = NULL;
-    vkzg_result rc = vkzg_prover_new_default(&prover, &opts);
+    vkzg_result rc = vkzg_prover_new(&prover, &opts);
     if (rc != VKZG_OK) {
         fprintf(stderr, "failed to create prover: %s\n", vkzg_error_string(rc));
         return 1;

@@ -32,9 +32,6 @@ extern "C" {
 #define VKZG_BYTES_PER_FIELD_ELEMENT 32
 #define VKZG_BYTES_PER_BLOB (VKZG_FIELD_ELEMENTS_PER_BLOB * VKZG_BYTES_PER_FIELD_ELEMENT)
 #define VKZG_BYTES_PER_PROOF 48
-/* Number of G1 points in the monomial-form trusted setup we consume. */
-#define VKZG_NUM_SETUP_G1_POINTS VKZG_FIELD_ELEMENTS_PER_BLOB
-#define VKZG_BYTES_PER_G1 48
 
 /* ----------------------------------------------------------------- status */
 
@@ -42,8 +39,8 @@ typedef enum {
     VKZG_OK = 0,
     VKZG_ERR_BADARGS = 1,     /* caller passed a null/invalid argument */
     VKZG_ERR_MALLOC = 2,      /* host allocation failed */
-    VKZG_ERR_IO = 3,          /* trusted setup or cache file could not be read */
-    VKZG_ERR_SETUP = 4,       /* trusted setup was malformed or off-curve */
+    VKZG_ERR_IO = 3,          /* the precomputed-tables file could not be read */
+    VKZG_ERR_SETUP = 4,       /* the precomputed-tables file was malformed */
     VKZG_ERR_GPU = 5,         /* no Vulkan device, or a shader failed to build */
     VKZG_ERR_INVALID_BLOB = 6 /* a field element in the blob was not canonical */
 } vkzg_result;
@@ -54,22 +51,6 @@ const char *vkzg_error_string(vkzg_result r);
 /* ---------------------------------------------------------------- options */
 
 typedef struct {
-    /*
-     * Path used to cache the derived FK20 tables.  Building them takes on the
-     * order of a second; loading the cache takes milliseconds.  If NULL, no
-     * cache is read or written.  The file is self-validating: it stores a
-     * digest of the trusted setup and the table layout version, and is
-     * silently rebuilt on mismatch.
-     */
-    const char *table_cache_path;
-
-    /*
-     * Verify that every trusted setup point is on the curve and in the correct
-     * subgroup.  Costs roughly a second.  Recommended for untrusted input;
-     * safe to skip for the canonical mainnet setup shipped with a client.
-     */
-    int validate_setup;
-
     /*
      * Number of blobs the prover should be able to have in flight.  Larger
      * values raise steady-state throughput at the cost of memory (roughly
@@ -86,22 +67,11 @@ void vkzg_options_default(vkzg_options *opts);
 typedef struct vkzg_prover vkzg_prover;
 
 /*
- * Build a prover using the Ethereum mainnet trusted setup, which is compiled
- * into the library.  This is what production callers want: the ceremony values
- * are fixed for the lifetime of the protocol, so there is no file to ship,
- * locate or validate at runtime.
+ * Build a prover for the Ethereum mainnet trusted setup. The setup's derived
+ * tables are precomputed and shipped with the library, so there is nothing
+ * to load or configure.
  */
-vkzg_result vkzg_prover_new_default(vkzg_prover **out, const vkzg_options *opts);
-
-/*
- * Build a prover from a caller-supplied monomial-form G1 trusted setup, for
- * testnets or a future ceremony.
- *
- * `g1_monomial_bytes` is VKZG_NUM_SETUP_G1_POINTS compressed points
- * (48 bytes each), in the same order and encoding c-kzg-4844 uses.
- */
-vkzg_result vkzg_prover_new(vkzg_prover **out, const uint8_t *g1_monomial_bytes,
-                              size_t g1_monomial_len, const vkzg_options *opts);
+vkzg_result vkzg_prover_new(vkzg_prover **out, const vkzg_options *opts);
 
 void vkzg_prover_free(vkzg_prover *p);
 

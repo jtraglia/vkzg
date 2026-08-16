@@ -23,10 +23,9 @@ int main(int argc, char **argv) {
 
     vkzg_options o;
     vkzg_options_default(&o);
-    o.table_cache_path = "/tmp/vkzg_prover_tables_v3.cache";
     o.max_batch_size = batch;
     vkzg_prover *p = nullptr;
-    if (vkzg_prover_new_default(&p, &o) != VKZG_OK) { printf("setup failed\n"); return 1; }
+    if (vkzg_prover_new(&p, &o) != VKZG_OK) { printf("setup failed\n"); return 1; }
 
     std::vector<uint8_t> blobs((size_t)batch * VKZG_BYTES_PER_BLOB);
     for (unsigned i = 0; i < batch; i++) fill_blob(&blobs[(size_t)i * VKZG_BYTES_PER_BLOB], i + 1);
