@@ -68,7 +68,7 @@ int main() {
             best = std::min(best, ms);
             total += ms;
         }
-        printf("  %-8s  best %7.2f ms   avg %7.2f ms   per blob %6.2f ms\n", label, best,
+        printf("  %-9s best %9.2f ms   avg %9.2f ms   per blob %6.2f ms\n", label, best,
                total / reps, best / n);
     };
 
