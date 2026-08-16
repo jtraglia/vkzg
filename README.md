@@ -36,17 +36,17 @@ Apple M1, 8 GPU cores, Fedora Asahi Remix, Mesa 26.1.6 (Honeykrisp):
 
 | | ms/blob | blobs/s |
 |---|---|---|
-| batch 1 | 109.5 | 9.1 |
-| batch 8 | 50.2 | 19.9 |
-| batch 16 | 46.1 | 21.7 |
-| batch 32 | 46.0 | 21.7 |
+| batch 1 | 98.3 | 10.2 |
+| batch 8 | 50.0 | 20.0 |
+| batch 16 | 46.2 | 21.6 |
+| batch 32 | 45.8 | 21.8 |
 | batch 64 | 45.0 | 22.2 |
-| **batch 128** | **44.8** | **22.3** |
+| **batch 128** | **44.6** | **22.4** |
 
 **This now beats the original `metal-prover`'s Metal numbers on the same
 8-core M1 at every batch size**, including unbatched (46.8 ms/blob at batch
 64 on Metal vs 45.0 here; 120.2 ms/blob at batch 1 on the pre-split Vulkan
-build vs 109.5 here) — not by inherently being faster than Metal or than the
+build vs 98.3 here) — not by inherently being faster than Metal or than the
 flat form, but because phase B no longer does the amount of work either of
 those did: see
 [the split-convolution rewrite](#4-the-128-point-convolution-splits-into-two-64-point-ones)
@@ -55,7 +55,12 @@ first version of the split regressed batch 1 by throwing away too much
 throughput on extra dispatches — worth reading if you're chasing a similar
 optimization, since the fix (collapsing dispatches back down, but not
 uniformly — one merge helped, a very similar-looking one hurt) is the
-non-obvious part.
+non-obvious part. The batch 1/2 numbers also include a second, later fix —
+the bucket-reduce stage now runs one of two lane counts, chosen at
+prover-creation time from the GPU's actual core count and per-dispatch from
+the batch size — see
+[the dynamic reduce lane count](#5-the-bucket-reduce-lane-count-is-chosen-from-the-gpus-actual-core-count)
+below.
 
 An Apple M1 Ultra (64 GPU cores), same driver stack — the shape of this
 project's very first Vulkan port, before any of the optimization work
@@ -351,6 +356,54 @@ bucket-MSM dispatch, the merged reduce, the combine step) dropped from
 theoretical cut. Net effect on total throughput: faster at *every* batch
 size tested, not just batch ≥ 8 — see [Results](#results).
 
+### 5. The bucket-reduce lane count is chosen from the GPU's actual core count
+
+`k_bucket_reduce.comp`'s cooperating-lane count (`L_REDUCE_LANES` — see the
+comment above it in `src/layout_defs.h`) started as a single tuned constant,
+the same way it worked on Metal. That stopped being good enough once this
+was tested on more than one GPU: an M1 Ultra (64 GPU cores) was measurably
+*slower* than an 8-core M1 at batch 1 in this stage specifically, despite
+having 8× the cores, and no amount of adjusting the *workgroup* shape (see
+[Checking the tuning](#checking-the-tuning-on-your-own-gpu) below) closed
+that gap. What did close it was more lanes — shortening the serial per-
+thread chain each lane runs before the shuffle-tree step — but more lanes
+also *loses* throughput once a dispatch already has enough independent
+workgroups to keep every core busy without that help, and how many
+workgroups is "enough" scales with the GPU's actual core count, not with
+batch size alone. Two real GPUs already disagree on the optimal fixed
+value: 4 lanes is better past batch ~4 on the 8-core M1 but 8 lanes is still
+winning at batch 64 on the Ultra.
+
+So it isn't a fixed value at all. `k_bucket_reduce.comp` declares its lane
+count as a specialization constant (`kSpecReduceLanes`), and `buildPipelines`
+(`src/vulkan_prover.cpp`) creates two `VkPipeline`s from the same SPIR-V
+module — one at the default lane count, one at double it — rather than
+compiling two shader variants. `recordReduce` picks between them on every
+dispatch from the batch size *and* the GPU's real core count.
+
+The core count itself is queried, not guessed. Vulkan has no portable query
+for it (unlike `std::thread::hardware_concurrency()` for CPUs), so
+device-name matching would be the fallback — explicitly avoided, since it
+can't generalize to a GPU this hasn't been tested on (a future Apple chip
+with a different core count, or any other Vulkan implementation entirely).
+Instead, `src/gpu_topology.cpp` uses `VK_EXT_physical_device_drm` (portable
+Vulkan, reports which `/dev/dri` node backs the physical device) to locate
+the render node, then asks the Linux kernel's own Asahi GPU driver for its
+real topology via `DRM_IOCTL_ASAHI_GET_PARAMS` — `num_clusters_total *
+num_cores_per_cluster`, the same number Mesa's own driver needs to schedule
+work and reports because it queries the firmware, not a table someone
+maintains per chip. A future Apple GPU with a different core count is
+picked up automatically, no code change required; any other Vulkan driver
+(this ioctl doesn't exist outside Asahi) reports "unknown," and
+`recordReduce` falls back to the default lane count unconditionally in that
+case, the same fixed behavior this library shipped with before this change.
+
+The threshold for switching lane counts (`kWorkgroupsPerCoreThreshold` in
+`recordReduce`) is fit to the two data points available — the 8-core M1's
+crossover between batch 2 and batch 4, the Ultra's clear win at batch 1 and
+small loss by batch 64 — not derived from a model of the hardware. Treat it
+as a reasonable starting point, not a proven constant.
+
 ## Checking the tuning on your own GPU
 
 The Metal version's tuning notes above have not been fully re-validated for
@@ -395,44 +448,31 @@ splitting phase B's convolution in two — is its own section, see
   from ~369ms to ~98ms — a real ~7% win on total throughput, not a rounding
   error. Worth checking on any kernel whose workgroup size was chosen for a
   32-wide Metal simdgroup without re-examining whether it still makes sense here.
-- **`L_REDUCE_LANES` inverts, but isn't a clean win.** Metal's sweep found 4
-  lanes optimal, with subgroup-shuffle cooperation still profitable at 2 and
-  only breaking even at 1. On this driver, cooperation *never* profits at
-  large batch (1 lane beats 4 at batch 64, and the trend is monotonic all the
-  way down) — plausible if `subgroupShuffleDown` is simply more expensive
-  relative to plain ALU work on this younger shader compiler than on Metal's.
-  But fewer lanes also means fewer, fatter threads per reduce dispatch
-  (`batch * 128 / L_REDUCE_LANES` total), and at small batch that's not
-  enough threads to hide latency: 1 lane is ~45% *slower* than 4 at batch 1.
-  `L_REDUCE_LANES` stays at 4 because it's the only setting that doesn't
-  regress the batch ≥ 8 range this library recommends; revisit if that
-  recommendation changes, or on a different Vulkan implementation. Full sweep
-  in the comment above `L_REDUCE_LANES` in `src/layout_defs.h`.
-- **Small batches starve on a GPU with many cores, and the cause is
-  workgroup count, not core count or thread count.** An M1 Ultra (64 GPU
-  cores) reported `reduce_a`/`reduce_b`/`ladder` running *slower* at batch 1
-  than an 8-core M1, despite being the same GPU family with 8× the cores.
-  Vulkan has no portable way to query GPU core or cluster count (unlike
-  `std::thread::hardware_concurrency()` for CPUs, and unlike Metal, which at
-  least exposes `recommendedMaxWorkingSetSize`-adjacent hints); device-name
-  string matching would be fragile and Apple-specific for a library that
-  targets any Vulkan 1.2 device. But the actual lever is measurable and
-  portable: workgroup *count*. `k_bucket_reduce.comp` and `k_ladder.comp`
-  both had a workgroup cover a whole blob's worth of output (128 threads),
-  so at batch 1 they dispatched only a handful of workgroups total — too few
-  to spread across a GPU with many independent compute clusters, no matter
-  how fast each cluster is. Narrowing both to `local_size_x = 32` (the
-  smallest that still holds a full subgroup, since `k_bucket_reduce.comp`'s
-  shuffles must stay inside one) quarters the per-workgroup work and
-  quadruples the workgroup count for the same total output, at no
-  correctness cost (each thread's work was already fully independent).
-  Validated clean — a small further improvement, not a tradeoff — across the
-  whole batch range on the 8-core M1; not yet independently confirmed on the
-  Ultra. If a genuine cross-hardware tradeoff ever does turn up (as
-  `L_REDUCE_LANES` already is, just not across different GPUs yet),
-  self-calibrating at prover-creation time by benchmarking candidate
-  dispatch shapes would be the principled fix — more robust than hard-coding
-  per-device constants, which this library deliberately avoids.
+- **Small batches starve on a GPU with many cores — but the fix isn't
+  workgroup count, it's lane count, and it genuinely differs by GPU.** An M1
+  Ultra (64 GPU cores) reported `reduce_a`/`reduce_b`/`ladder` running
+  *slower* at batch 1 than an 8-core M1, despite being the same GPU family
+  with 8× the cores. The first fix tried was narrowing `k_bucket_reduce.comp`
+  and `k_ladder.comp`'s workgroups from 128 threads to 32 (four times as
+  many, smaller workgroups for the same total work, on the theory that a
+  GPU with many independent compute clusters needs more of them to spread
+  across) — a real, if small, win on the 8-core M1 across the whole batch
+  range, but it turned out to have **no measurable effect on the Ultra's
+  gap at all**, disproving that theory: going from 1 to 4 workgroups
+  (ladder) or 4 to 16 (reduce) didn't move the Ultra's numbers, so
+  insufficient workgroup count wasn't actually the bottleneck for either
+  kernel, just a plausible-looking one. (The narrower workgroups were kept
+  anyway, since they're a clean win on the one machine where they do help
+  and harmless elsewhere.) The real lever for `reduce_a`/`reduce_b`,
+  confirmed by direct measurement on both GPUs, was `L_REDUCE_LANES`
+  (shortening the serial per-thread chain each lane runs) — and *how much*
+  it helps scales with the GPU's core count, which is a genuine
+  cross-hardware tradeoff, not a batch-size-only one: this is now handled
+  by querying real GPU topology and choosing the lane count dynamically —
+  see
+  [section 5 above](#5-the-bucket-reduce-lane-count-is-chosen-from-the-gpus-actual-core-count).
+  The ladder's own slowdown on the Ultra is still unexplained; it has no
+  lanes-equivalent knob, so it's still open (see below).
 
 Still open, in roughly the order worth checking next:
 
@@ -453,6 +493,21 @@ Still open, in roughly the order worth checking next:
   regardless of batch size (one per output point), so the same starvation
   wouldn't apply the same way — but that assumption hasn't been checked by
   actually measuring them on a many-cluster GPU.
+- **The ladder's slowdown on the Ultra at small batch is still
+  unexplained.** Narrowing its workgroups (above) had no effect, and unlike
+  `k_bucket_reduce.comp` it has no lanes-style cooperation knob to trade
+  serial chain length for shuffle overhead — each thread's 248-doubling
+  chain is already fully independent. Worth investigating whether it's
+  cross-die memory latency (the Ultra is two dice joined by UltraFusion;
+  `queryGpuTotalCores` in `src/gpu_topology.cpp` also has `num_dies`
+  available, unused so far) or something else entirely.
+- **The dynamic reduce-lane-count mechanism (section 5 above) has only been
+  validated on the two GPUs it was built from.** The formula it uses is
+  fit to two data points, not derived; it would benefit from confirmation —
+  or correction — on a third GPU, ideally one with a different core count
+  or vendor entirely (the Asahi-specific topology query silently reports
+  "unknown" and falls back to the fixed default anywhere else, so it's safe
+  to try, just untuned there).
 
 The MSM window (`L_WINDOW_BITS`, 8) sets the whole shape — digits, buckets and
 the 24 MiB table — and was optimal by a clear margin on Metal; it is a
@@ -497,13 +552,17 @@ cannot drift.
 
 - **Vulkan-specific tuning is partially done** — see
   [Checking the tuning](#checking-the-tuning-on-your-own-gpu) for what's been
-  checked (the profiler itself, the ladder's workgroup size, `L_REDUCE_LANES`,
-  now also the split form's dispatch count — see
+  checked (the profiler itself, the ladder's workgroup size, the split form's
+  dispatch count — see
   [How it works](#4-the-128-point-convolution-splits-into-two-64-point-ones))
   and what's still open (`inversionChunk`, the per-dispatch barriers, other
-  kernels' workgroup sizes). This library now runs *faster* than the original
-  Metal build at every batch size on the same 8-core M1, so this is no longer
-  about closing a gap, just further headroom.
+  kernels' workgroup sizes, the ladder's still-unexplained Ultra slowdown).
+  `L_REDUCE_LANES` is no longer a fixed tuning value at all — it's chosen per
+  dispatch from real queried GPU topology, see
+  [section 5](#5-the-bucket-reduce-lane-count-is-chosen-from-the-gpus-actual-core-count).
+  This library now runs *faster* than the original Metal build at every
+  batch size on the same 8-core M1, so this is no longer about closing a
+  gap, just further headroom.
 - **Recursing the split further** (`X⁶⁴−1 = (X³²−1)(X³²+1)`, and so on) keeps
   halving tap density in the same self-similar way; a back-of-envelope check
   during development (plain field arithmetic, no GPU) found the *tap ×

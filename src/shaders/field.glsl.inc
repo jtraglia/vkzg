@@ -453,12 +453,15 @@ G1 g1_shuffle_down(G1 p, uint delta) {
 
 // Collapses 128 buckets into sum_{k=1}^{128} k * B[k-1].
 //
-// L_REDUCE_LANES lanes cooperate on one output, each first collapsing a
+// `lanes` threads cooperate on one output, each first collapsing a
 // contiguous run of buckets with a serial running sum, then combining across
-// lanes with a shuffle tree.  See kernels/k_bucket_reduce.comp for why the
-// split matters; the maths is unchanged from the Metal original.
-G1 reduce_buckets(U32Buf buckets, uint base, uint pos) {
-    const uint per_lane = L_NUM_BUCKETS / L_REDUCE_LANES;
+// lanes with a shuffle tree.  `lanes` is a specialization constant at the
+// call site (k_bucket_reduce.comp), not a compile-time macro here, so the
+// same shader binary can be instantiated as more than one PSO -- see that
+// file and recordReduce in vulkan_prover.cpp for why the lane count varies
+// per dispatch. The maths is unchanged from the Metal original.
+G1 reduce_buckets(U32Buf buckets, uint base, uint pos, uint lanes) {
+    const uint per_lane = L_NUM_BUCKETS / lanes;
 
     // Serial running sum over this lane's slice, from the top down, giving
     // rs = sum_i (i+1) * B[base+i] and s = sum_i B[base+i].
@@ -471,7 +474,7 @@ G1 reduce_buckets(U32Buf buckets, uint base, uint pos) {
     }
     G1 w = g1_identity();
 
-    for (uint level = 0u; (1u << level) < L_REDUCE_LANES; level++) {
+    for (uint level = 0u; (1u << level) < lanes; level++) {
         const uint h = 1u << level;
         // Every lane must reach the shuffle, so compute first and commit after.
         const G1 sb = g1_shuffle_down(s, h);
@@ -491,7 +494,10 @@ G1 reduce_buckets(U32Buf buckets, uint base, uint pos) {
 
     // Lane 0 holds rs = sum_p RS_p and w = sum_p p * GS_p, and
     //     sum_k (k+1) B_k = sum_p [ RS_p + per_lane * p * GS_p ].
-    for (uint t = 0u; t < L_LOG_REDUCE_PER_LANE; t++) w = g1_dbl(w);
+    // per_lane is always a power of two, so its bit index is its log2 --
+    // no separate host-supplied log constant to keep in sync with `lanes`.
+    const uint log_per_lane = uint(findLSB(per_lane));
+    for (uint t = 0u; t < log_per_lane; t++) w = g1_dbl(w);
     return g1_add(rs, w);
 }
 

@@ -90,54 +90,42 @@
  * collapsing L_NUM_BUCKETS / L_REDUCE_LANES buckets serially, then a subgroup
  * shuffle tree across the lanes. At L_REDUCE_LANES == 1 the tree is empty and
  * every thread reduces all 128 buckets on its own, with no shuffles at all --
- * that also means fewer, fatter output-carrying threads per dispatch, which
- * matters below.
+ * that also means fewer, fatter output-carrying threads per dispatch.
  *
  * Metal (Apple GPU, `simd_shuffle_down`) measured 4 lanes as the optimum at
  * batch 64: 4 lanes 46.1 ms/blob, 8 lanes 48.0, 16 lanes 53.4, 32 lanes 71.8,
  * 2 lanes 48.3, 1 lane 49.6 -- cooperation paying for itself down to 2 lanes,
  * only backfiring once you go all the way to 1.
  *
- * On this Vulkan/Honeykrisp driver (`subgroupShuffleDown`) fewer lanes is
- * better at large batch but *worse* at small batch, because L_REDUCE_LANES
- * also sets how many threads a reduce dispatch launches (batch * 128 /
- * L_REDUCE_LANES): fewer lanes means fewer, fatter threads, and at small
- * batch that's not enough threads to hide the GPU's latency, cooperation or
- * not. Full sweep, ms/blob:
+ * On Vulkan/Honeykrisp, more lanes helps at small batch and hurts at large
+ * batch, on *every* GPU tested -- but where the crossover falls depends on
+ * the GPU's actual core count, not just the batch size. More lanes means a
+ * shorter serial per-thread chain (good when a dispatch is latency-bound:
+ * few enough workgroups, relative to the GPU's core count, that there's
+ * nothing else to hide that latency behind) but also more total shuffle-
+ * tree work (bad once there are already enough independent workgroups to
+ * keep every core busy, since the extra instructions just add up). An M1
+ * Ultra (64 cores) at batch 1 has 8x fewer workgroups per core than an
+ * 8-core M1 does at the same batch, so it needs more lanes at a batch size
+ * where the 8-core M1 already has enough to switch to fewer: 8 lanes beat 4
+ * by ~18% on the Ultra at batch 1 (157.8ms -> 130.1ms) while only barely
+ * regressing batch 64 (+2%); the same change on the 8-core M1 helps batch
+ * 1-2 (~10%) but measurably hurts batch >= 4 (+5-6%).
  *
- *   lanes   batch 1   batch 8   batch 16   batch 32   batch 64
- *       1     174.2      69.2       60.4       60.7       58.5
- *       2     140.1      63.0       61.3       59.4       59.0
- *       4     120.1      64.7       60.6       60.5       59.5
- *
- * 4 lanes is kept: it is the only setting that doesn't regress the batch >= 8
- * range this library recommends (see the README's Batching section) to chase
- * a ~1.7% win that only shows up at batch 64, and it is dramatically better
- * at batch 1. Worth revisiting if the recommended batch range changes, or on
- * a different Vulkan implementation.
- *
- * Separately from L_REDUCE_LANES: k_bucket_reduce.comp's workgroup size
- * (L_REDUCE_OUTPUTS_PER_TG * L_REDUCE_LANES threads) went from 128 down to
- * 32 -- the smallest that still holds a full subgroup, since a team's
- * shuffles must stay inside one 32-wide subgroup -- after an M1 Ultra
- * measured this stage 2x *slower* than the 8-core M1 at batch 1 despite
- * being the same GPU family with 8x the cores. The cause wasn't thread
- * count or lane count, it was *workgroup* count: at batch 1 there were only
- * 4 workgroups total (count=128 outputs / 32 outputs-per-workgroup at the
- * old size), and a GPU with many more independent compute clusters than
- * the one this was tuned on can't spread 4 workgroups across itself no
- * matter how fast each cluster is -- most of the chip idles regardless of
- * core count. Quartering the workgroup size quadruples the workgroup count
- * for the same output count, which is what actually lets a bigger GPU help.
- * Confirmed harmless on the 8-core M1 across the whole batch range (a small
- * *improvement*, not a tradeoff) before assuming it would also help the
- * Ultra; k_ladder.comp's workgroup size was dropped 128 -> 32 for the same
- * reason and with the same on-the-8-core-M1 validation.
+ * Because the crossover point scales with core count, L_REDUCE_LANES is not
+ * a compile-time constant at all: k_bucket_reduce.comp declares it as a
+ * specialization constant, buildPipelines (vulkan_prover.cpp) creates one
+ * VkPipeline per lane count from the same SPIR-V module, and recordReduce
+ * picks a pipeline per dispatch from the batch size and the GPU's real
+ * core/cluster count -- queried live at prover-creation time (see
+ * gpu_topology.h/.cpp), not guessed from a device-name string. That keeps
+ * this correct on any core count a future GPU (Apple or otherwise) reports,
+ * without a per-device table to maintain; unknown/unqueryable topology
+ * (any non-Asahi Vulkan driver right now) falls back to the fixed default
+ * below, both lanes settings having already been validated safe there.
  */
 #define L_LOAD_CLASSES 64 /* counting-sort bins for the bucket load ordering */
 
-#define L_REDUCE_LANES 4
-#define L_LOG_REDUCE_PER_LANE 5
-#define L_REDUCE_OUTPUTS_PER_TG 8 /* 32 threads / L_REDUCE_LANES */
+#define L_REDUCE_LANES 4 /* default lane count when GPU topology can't be queried */
 
 #endif /* VULKAN_PROVER_LAYOUT_DEFS_H */

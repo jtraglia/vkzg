@@ -64,6 +64,7 @@ endif()
 # ------------------------------------------------------------------ library
 add_library(vulkan_prover
     src/vulkan_prover.cpp
+    src/gpu_topology.cpp
     src/cpu/bls12_381.cpp
     src/cpu/setup.cpp
     src/setup_data.cpp)

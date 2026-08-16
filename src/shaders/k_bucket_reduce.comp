@@ -1,20 +1,39 @@
-// One subgroup serves L_REDUCE_LANES-sized teams; a 32-thread workgroup
-// therefore reduces 8 outputs at once with no shared memory at all.
+// One subgroup serves `L_REDUCE_LANES`-sized teams; a 32-thread workgroup
+// therefore reduces (32 / L_REDUCE_LANES) outputs at once with no shared
+// memory at all.
 //
 // local_size_x is 32 (one workgroup per subgroup) rather than 128: at 128,
-// batch 1 (count=128) dispatches only 8 workgroups total, too few to
-// spread across a GPU with many independent compute clusters (an M1 Ultra
-// measured this stage slower than an 8-core M1 at batch 1, despite having
-// 8x the cores). 32-wide is the narrowest workgroup that still holds a
-// full subgroup -- shuffles in reduce_buckets must stay inside one
-// subgroup -- and it quadruples the workgroup count for the same output
-// count, which is what actually lets a bigger GPU help. Confirmed harmless
-// on the 8-core M1 across the whole batch range before assuming it would
-// also help the Ultra.
+// batch 1 (count=128) dispatches only a handful of workgroups total, too
+// few to spread across a GPU with many independent compute clusters (an M1
+// Ultra measured this stage slower than an 8-core M1 at batch 1, despite
+// having 8x the cores). 32-wide is the narrowest workgroup that still holds
+// a full subgroup -- shuffles in reduce_buckets must stay inside one
+// subgroup.
+//
+// L_REDUCE_LANES is a specialization constant, not a macro: this same
+// SPIR-V module backs two VkPipelines (see buildPipelines in
+// vulkan_prover.cpp), one for each lane count the tuning below found worth
+// keeping. More lanes means a shorter serial per-thread chain in
+// reduce_buckets (good when a dispatch is latency-bound: few enough total
+// workgroups, relative to the GPU's actual core count, that there's nothing
+// else to hide that latency behind) but also more total shuffle-tree work
+// (bad once the dispatch is throughput-bound: plenty of independent
+// workgroups already, so the extra instructions just add up). Which regime
+// a given call is in depends on both the batch size *and* the GPU's core
+// count -- recordReduce picks the lane count per-dispatch from both,
+// querying real core-count topology at prover-creation time rather than
+// assuming one fixed value or matching on a device name (see
+// gpu_topology.h/.cpp).
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #include "field.glsl.inc"
 
+// A plain macro named L_REDUCE_LANES already exists (layout_defs.h, shared
+// with the host) as the fallback lane count for when GPU topology can't be
+// queried; it would collide with (and get macro-expanded into) a
+// specialization constant of the same name, so this one is spelled
+// differently despite meaning the same thing.
+layout(constant_id = 0) const uint kSpecReduceLanes = 4;
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant, std430) uniform PC {
@@ -27,19 +46,20 @@ void main() {
     U32Buf outBuf = U32Buf(pc.outAddr);
     U32Buf bucketsBuf = U32Buf(pc.bucketsAddr);
 
+    const uint outputsPerTg = 32u / kSpecReduceLanes;
     const uint tid = gl_LocalInvocationID.x;
-    const uint team = tid / L_REDUCE_LANES;
-    const uint pos = tid % L_REDUCE_LANES;
-    // `count` need not be a multiple of the 8 outputs a workgroup covers.
+    const uint team = tid / kSpecReduceLanes;
+    const uint pos = tid % kSpecReduceLanes;
+    // `count` need not be a multiple of the outputs a workgroup covers.
     // Teams past the end are clamped onto the last valid output rather than
     // returning early: reduce_buckets exchanges points with subgroup
     // shuffles, and those require every lane in the group to participate.
-    const uint raw = gl_WorkGroupID.x * L_REDUCE_OUTPUTS_PER_TG + team;
+    const uint raw = gl_WorkGroupID.x * outputsPerTg + team;
     const uint j = min(raw, pc.count - 1u);
     const uint b = gl_WorkGroupID.y;
 
     const uint base = (b * L_CIRCULANT_SIZE * L_NUM_BUCKETS + j * L_NUM_BUCKETS) * L_JACOBIAN_WORDS;
-    const G1 total = reduce_buckets(bucketsBuf, base, pos);
+    const G1 total = reduce_buckets(bucketsBuf, base, pos, kSpecReduceLanes);
     if (pos == 0u && raw < pc.count) {
         g1_store(outBuf, (b * L_CIRCULANT_SIZE + j) * L_JACOBIAN_WORDS, total);
     }

@@ -10,6 +10,7 @@
 #include "vulkan_prover.h"
 #include "cpu/bls12_381.h"
 #include "cpu/setup.h"
+#include "gpu_topology.h"
 #include "internal.h"
 #include "setup_data.h"
 #include "profile.h"
@@ -97,7 +98,8 @@ struct vkp_prover {
     VkPipeline psoCombineSplit = VK_NULL_HANDLE;
     VkPipeline psoNormalize = VK_NULL_HANDLE;
     VkPipeline psoCompress = VK_NULL_HANDLE;
-    VkPipeline psoReduce = VK_NULL_HANDLE;
+    VkPipeline psoReduceThroughput = VK_NULL_HANDLE; // L_REDUCE_LANES lanes, see layout_defs.h
+    VkPipeline psoReduceLatency = VK_NULL_HANDLE;    // 2x L_REDUCE_LANES lanes
 
     // Setup-derived, immutable.
     VkBuf bufTable, bufRootsFwd, bufRootsInv;
@@ -111,6 +113,7 @@ struct vkp_prover {
 
     uint32_t maxBatch = 0;
     std::string deviceName;
+    uint32_t gpuTotalCores = 0; // 0 = unknown topology; see gpu_topology.h
     std::mutex mutex;
 
     uint32_t invBlob[kFrLimbs] = {0};
@@ -279,7 +282,7 @@ vkp_prover::~vkp_prover() {
     destroyBuffer(device, bufKernelPermMinus);
     for (VkPipeline pso : {psoBlobToFr, psoNtt, psoBuildCirculant, psoPhaseASort, psoPhaseA,
                            psoLadder, psoFoldLadder, psoPhaseBSplit, psoCombineSplit, psoNormalize, psoCompress,
-                           psoReduce}) {
+                           psoReduceThroughput, psoReduceLatency}) {
         if (pso) vkDestroyPipeline(device, pso, nullptr);
     }
     if (pipelineLayout) vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
@@ -385,7 +388,6 @@ vkp_result buildPipelines(vkp_prover *p) {
         {"k_combine_split", &p->psoCombineSplit},
         {"k_normalize", &p->psoNormalize},
         {"k_compress_proofs", &p->psoCompress},
-        {"k_bucket_reduce", &p->psoReduce},
     };
 
     VkPushConstantRange pcRange{};
@@ -431,6 +433,62 @@ vkp_result buildPipelines(vkp_prover *p) {
         vkDestroyShaderModule(p->device, module, nullptr);
         if (rc != VK_SUCCESS) return VKP_ERR_GPU;
     }
+
+    // k_bucket_reduce is special: one SPIR-V module, two VkPipelines that
+    // differ only in the L_REDUCE_LANES specialization constant (id 0) --
+    // recordReduce picks between them per dispatch based on batch size and
+    // queried GPU core count. See the comment above L_REDUCE_LANES in
+    // layout_defs.h for why.
+    {
+        const ShaderSpv *spv = nullptr;
+        for (size_t i = 0; i < kShaderCount; i++) {
+            if (strcmp(kShaders[i].name, "k_bucket_reduce") == 0) {
+                spv = &kShaders[i];
+                break;
+            }
+        }
+        if (!spv) return VKP_ERR_GPU;
+
+        VkShaderModuleCreateInfo modInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        modInfo.codeSize = spv->words * 4;
+        modInfo.pCode = spv->code;
+        VkShaderModule module = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(p->device, &modInfo, nullptr, &module) != VK_SUCCESS) {
+            return VKP_ERR_GPU;
+        }
+
+        const uint32_t lanesThroughput = L_REDUCE_LANES;
+        const uint32_t lanesLatency = L_REDUCE_LANES * 2;
+        VkSpecializationMapEntry mapEntry{0, 0, sizeof(uint32_t)};
+        VkSpecializationInfo specThroughput{1, &mapEntry, sizeof(uint32_t), &lanesThroughput};
+        VkSpecializationInfo specLatency{1, &mapEntry, sizeof(uint32_t), &lanesLatency};
+
+        VkPipelineShaderStageCreateInfo stageThroughput{
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+        stageThroughput.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stageThroughput.module = module;
+        stageThroughput.pName = "main";
+        stageThroughput.pSpecializationInfo = &specThroughput;
+
+        VkPipelineShaderStageCreateInfo stageLatency = stageThroughput;
+        stageLatency.pSpecializationInfo = &specLatency;
+
+        VkComputePipelineCreateInfo pipeInfos[2]{};
+        pipeInfos[0] = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        pipeInfos[0].stage = stageThroughput;
+        pipeInfos[0].layout = p->pipelineLayout;
+        pipeInfos[1] = {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        pipeInfos[1].stage = stageLatency;
+        pipeInfos[1].layout = p->pipelineLayout;
+
+        VkPipeline pipelines[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+        const VkResult rc = vkCreateComputePipelines(p->device, VK_NULL_HANDLE, 2, pipeInfos,
+                                                      nullptr, pipelines);
+        vkDestroyShaderModule(p->device, module, nullptr);
+        if (rc != VK_SUCCESS) return VKP_ERR_GPU;
+        p->psoReduceThroughput = pipelines[0];
+        p->psoReduceLatency = pipelines[1];
+    }
     return VKP_OK;
 }
 
@@ -455,6 +513,7 @@ vkp_result createProver(vkp_prover **out, SetupTables &tables, const vkp_options
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(p->physDev, &props);
     p->deviceName = props.deviceName;
+    p->gpuTotalCores = queryGpuTotalCores(p->physDev);
 
     const float queuePriority = 1.0f;
     VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -667,11 +726,38 @@ struct ReducePC {
     uint32_t count;
 };
 
+// Picks the reduce dispatch's lane count (see the comment above
+// L_REDUCE_LANES in layout_defs.h) from the batch size and the GPU's real
+// core count, rather than a fixed constant or a device-name guess.
+//
+// k_bucket_reduce.comp dispatches (count / (32/lanes)) * batch workgroups;
+// at the default lane count that's (L_REDUCE_LANES * count / 32) * batch.
+// The latency variant (2x the lanes) wins when that count leaves each core
+// with only a handful of workgroups to hide the reduce loop's serial
+// latency behind; the threshold below (~6 workgroups/core at the default
+// lane count) is fit to the two GPUs this has actually been measured on
+// (an 8-core Apple M1: crossover between batch 2 and batch 4; a 64-core M1
+// Ultra: a clear win at batch 1, a small loss by batch 64) rather than
+// derived from first principles, so treat it as a starting point, not a
+// proven constant -- it should be revisited if measurements on a
+// differently-shaped GPU disagree with it.
+bool useLatencyReduce(uint32_t count, uint32_t batch, uint32_t gpuTotalCores) {
+    if (gpuTotalCores == 0) return false; // unknown topology: keep the safe default
+    constexpr uint32_t kWorkgroupsPerCoreThreshold = 6;
+    const uint64_t workgroupsAtDefault =
+        (uint64_t)L_REDUCE_LANES * count / 32 * batch;
+    return workgroupsAtDefault < (uint64_t)kWorkgroupsPerCoreThreshold * gpuTotalCores;
+}
+
 void recordReduce(VkCommandBuffer cmd, vkp_prover *p, const VkBuf &out, uint32_t count,
                   uint32_t batch) {
+    const bool latency = useLatencyReduce(count, batch, p->gpuTotalCores);
+    const uint32_t lanes = latency ? (L_REDUCE_LANES * 2) : L_REDUCE_LANES;
+    const uint32_t outputsPerTg = 32 / lanes;
     ReducePC pc{out.addr, p->bufBuckets.addr, count};
-    const uint32_t groups = (count + L_REDUCE_OUTPUTS_PER_TG - 1) / L_REDUCE_OUTPUTS_PER_TG;
-    dispatch(cmd, p->psoReduce, p->pipelineLayout, pc, groups, batch);
+    const uint32_t groups = (count + outputsPerTg - 1) / outputsPerTg;
+    dispatch(cmd, latency ? p->psoReduceLatency : p->psoReduceThroughput, p->pipelineLayout, pc,
+             groups, batch);
 }
 
 struct NormalizePC {
