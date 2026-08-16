@@ -20,6 +20,10 @@ cmake --build build -j
 ./build/bench
 ```
 
+## Java bindings
+
+See [`bindings/java`](bindings/java).
+
 ## Benchmarks
 
 ```
