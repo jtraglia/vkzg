@@ -12,7 +12,7 @@
 // the kernel headers for it are), and is written so adding another vendor's
 // ioctl later is a second, independent branch, not a rewrite.
 #if defined(__linux__) && __has_include(<drm/asahi_drm.h>)
-#define VKP_HAVE_ASAHI_TOPOLOGY 1
+#define VKZG_HAVE_ASAHI_TOPOLOGY 1
 #include <drm/asahi_drm.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -23,9 +23,9 @@
 #include <unistd.h>
 #endif
 
-namespace vkp {
+namespace vkzg {
 
-#if VKP_HAVE_ASAHI_TOPOLOGY
+#if VKZG_HAVE_ASAHI_TOPOLOGY
 
 namespace {
 
@@ -100,4 +100,4 @@ uint32_t queryGpuTotalCores(VkPhysicalDevice) { return 0; }
 
 #endif
 
-} // namespace vkp
+} // namespace vkzg

@@ -3,11 +3,11 @@
 // Not part of the public API.  Recorded by the real compute path.
 #pragma once
 
-#include "../include/vulkan_prover.h"
+#include "../include/vkzg.h"
 
 #include <cstddef>
 
-namespace vkp {
+namespace vkzg {
 
 struct StageTimes {
     double scalar_stage = 0; // blob deserialise, inverse NTT, circulant
@@ -25,7 +25,7 @@ struct StageTimes {
 };
 
 // Runs the normal compute path and reports what it measured.
-vkp_result profile_batch(vkp_prover *p, unsigned char *proofs, const unsigned char *blobs,
+vkzg_result profile_batch(vkzg_prover *p, unsigned char *proofs, const unsigned char *blobs,
                            unsigned batch, StageTimes &out);
 
-} // namespace vkp
+} // namespace vkzg

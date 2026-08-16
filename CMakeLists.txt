@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(vulkan-prover LANGUAGES C CXX VERSION 0.1.0)
+project(vkzg LANGUAGES C CXX VERSION 0.1.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,9 +7,9 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-option(VULKAN_PROVER_BUILD_TESTS "Build the test executables" ON)
-option(VULKAN_PROVER_BUILD_BENCHMARKS "Build the benchmark executables" ON)
-option(VULKAN_PROVER_REGENERATE "Re-run the constant and shader generators at build time" ON)
+option(VKZG_BUILD_TESTS "Build the test executables" ON)
+option(VKZG_BUILD_BENCHMARKS "Build the benchmark executables" ON)
+option(VKZG_REGENERATE "Re-run the constant and shader generators at build time" ON)
 
 find_package(Python3 COMPONENTS Interpreter)
 find_package(Vulkan REQUIRED)
@@ -43,7 +43,7 @@ set(SHADER_COMMON
     ${GEN_DEV_CONSTANTS}
     ${SHADER_DIR}/field.glsl.inc)
 
-if(VULKAN_PROVER_REGENERATE AND Python3_Interpreter_FOUND)
+if(VKZG_REGENERATE AND Python3_Interpreter_FOUND)
     add_custom_command(
         OUTPUT ${GEN_HOST_CONSTANTS} ${GEN_DEV_CONSTANTS}
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_constants.py
@@ -58,22 +58,22 @@ if(VULKAN_PROVER_REGENERATE AND Python3_Interpreter_FOUND)
                 ${KERNEL_SOURCES}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_shaders.py ${SHADER_COMMON} ${KERNEL_SOURCES}
         COMMENT "Compiling and embedding SPIR-V kernels")
-    add_custom_target(vulkan_prover_generated DEPENDS ${GEN_SHADER_SOURCE} ${GEN_HOST_CONSTANTS})
+    add_custom_target(vkzg_generated DEPENDS ${GEN_SHADER_SOURCE} ${GEN_HOST_CONSTANTS})
 endif()
 
 # ------------------------------------------------------------------ library
-add_library(vulkan_prover
-    src/vulkan_prover.cpp
+add_library(vkzg
+    src/vkzg.cpp
     src/gpu_topology.cpp
     src/cpu/bls12_381.cpp
     src/cpu/setup.cpp
     src/setup_data.cpp)
 
-if(TARGET vulkan_prover_generated)
-    add_dependencies(vulkan_prover vulkan_prover_generated)
+if(TARGET vkzg_generated)
+    add_dependencies(vkzg vkzg_generated)
 endif()
 
-target_include_directories(vulkan_prover
+target_include_directories(vkzg
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -82,32 +82,32 @@ target_include_directories(vulkan_prover
 # relying on C++ value-initialization to zero the rest -- correct and the
 # idiom used throughout this codebase, but -Wextra otherwise warns on every
 # single field a large Vulkan struct doesn't explicitly list.
-target_compile_options(vulkan_prover PRIVATE -Wall -Wextra -Wno-missing-field-initializers -O3)
-target_link_libraries(vulkan_prover PUBLIC Vulkan::Vulkan)
-set_target_properties(vulkan_prover PROPERTIES
-    PUBLIC_HEADER include/vulkan_prover.h
+target_compile_options(vkzg PRIVATE -Wall -Wextra -Wno-missing-field-initializers -O3)
+target_link_libraries(vkzg PUBLIC Vulkan::Vulkan)
+set_target_properties(vkzg PROPERTIES
+    PUBLIC_HEADER include/vkzg.h
     VERSION ${PROJECT_VERSION})
 
 # The reference implementation is only needed by tests, so keep it out of the
 # shipped library.
-add_library(vulkan_prover_reference STATIC src/cpu/reference.cpp)
-target_include_directories(vulkan_prover_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_options(vulkan_prover_reference PRIVATE -O3)
+add_library(vkzg_reference STATIC src/cpu/reference.cpp)
+target_include_directories(vkzg_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(vkzg_reference PRIVATE -O3)
 
 # -------------------------------------------------------------------- tests
-if(VULKAN_PROVER_BUILD_TESTS)
+if(VKZG_BUILD_TESTS)
     enable_testing()
-    add_library(vulkan_prover_vectors STATIC tests/vectors.cpp)
-    target_include_directories(vulkan_prover_vectors PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    add_library(vkzg_vectors STATIC tests/vectors.cpp)
+    target_include_directories(vkzg_vectors PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
     add_executable(test_cpu_field tests/test_cpu_field.cpp)
-    target_link_libraries(test_cpu_field PRIVATE vulkan_prover)
+    target_link_libraries(test_cpu_field PRIVATE vkzg)
 
     add_executable(test_reference tests/test_reference.cpp)
-    target_link_libraries(test_reference PRIVATE vulkan_prover vulkan_prover_reference vulkan_prover_vectors)
+    target_link_libraries(test_reference PRIVATE vkzg vkzg_reference vkzg_vectors)
 
     add_executable(test_gpu tests/test_gpu.cpp)
-    target_link_libraries(test_gpu PRIVATE vulkan_prover vulkan_prover_vectors)
+    target_link_libraries(test_gpu PRIVATE vkzg vkzg_vectors)
 
     set(VEC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tests/vectors)
     add_test(NAME cpu_field COMMAND test_cpu_field)
@@ -116,20 +116,20 @@ if(VULKAN_PROVER_BUILD_TESTS)
 endif()
 
 # --------------------------------------------------------------- benchmarks
-if(VULKAN_PROVER_BUILD_BENCHMARKS)
+if(VKZG_BUILD_BENCHMARKS)
     add_executable(bench bench/bench.cpp)
-    target_link_libraries(bench PRIVATE vulkan_prover)
+    target_link_libraries(bench PRIVATE vkzg)
 
     add_executable(profile_stages bench/profile_stages.cpp)
-    target_link_libraries(profile_stages PRIVATE vulkan_prover)
+    target_link_libraries(profile_stages PRIVATE vkzg)
 endif()
 
 add_executable(example examples/example.c)
-target_link_libraries(example PRIVATE vulkan_prover)
+target_link_libraries(example PRIVATE vkzg)
 
 # ------------------------------------------------------------------ install
 include(GNUInstallDirs)
-install(TARGETS vulkan_prover
+install(TARGETS vkzg
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})

@@ -5,8 +5,8 @@
  * included into the GLSL shader sources.  internal.h turns these
  * into typed constexprs for the host; the shaders use the macros directly.
  */
-#ifndef VULKAN_PROVER_LAYOUT_DEFS_H
-#define VULKAN_PROVER_LAYOUT_DEFS_H
+#ifndef VKZG_LAYOUT_DEFS_H
+#define VKZG_LAYOUT_DEFS_H
 
 #define L_FIELD_ELEMENTS_PER_BLOB 4096
 #define L_FIELD_ELEMENTS_PER_EXT_BLOB 8192
@@ -63,7 +63,7 @@
  * of the same bucket buffer. An earlier version used two dispatches per
  * stage (one per half) and measured noticeably worse at small batch: on
  * this driver each extra dispatch's fixed overhead (submission, the
- * pipeline barrier in vulkan_prover.cpp) costs more than this algorithmic
+ * pipeline barrier in vkzg.cpp) costs more than this algorithmic
  * saving does when there isn't much batch to amortise it over. Collapsing
  * to one dispatch per stage keeps the large-batch win without that
  * small-batch cost -- see the README's Results section for the numbers.
@@ -114,7 +114,7 @@
  *
  * Because the crossover point scales with core count, L_REDUCE_LANES is not
  * a compile-time constant at all: k_bucket_reduce.comp declares it as a
- * specialization constant, buildPipelines (vulkan_prover.cpp) creates one
+ * specialization constant, buildPipelines (vkzg.cpp) creates one
  * VkPipeline per lane count from the same SPIR-V module, and recordReduce
  * picks a pipeline per dispatch from the batch size and the GPU's real
  * core/cluster count -- queried live at prover-creation time (see
@@ -128,4 +128,4 @@
 
 #define L_REDUCE_LANES 4 /* default lane count when GPU topology can't be queried */
 
-#endif /* VULKAN_PROVER_LAYOUT_DEFS_H */
+#endif /* VKZG_LAYOUT_DEFS_H */

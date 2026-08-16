@@ -14,7 +14,7 @@
 #include <cstdio>
 #include <cstring>
 
-using namespace vkp;
+using namespace vkzg;
 
 static int g_failures = 0;
 
@@ -183,12 +183,12 @@ int main(int argc, char **argv) {
     SetupTables tables;
     double t0 = now_ms();
     // Reuse a cache so repeated runs during development are quick.
-    const std::string cache = "/tmp/vkp_prover_tables_ref.cache";
+    const std::string cache = "/tmp/vkzg_prover_tables_ref.cache";
     const uint64_t digest = compute_setup_digest(kEmbeddedSetupG1Monomial, kEmbeddedSetupSize);
-    bool loaded = load_table_cache(cache, digest, tables) == VKP_OK;
+    bool loaded = load_table_cache(cache, digest, tables) == VKZG_OK;
     if (!loaded) {
         if (build_setup_tables(kEmbeddedSetupG1Monomial, kEmbeddedSetupSize, true, tables) !=
-            VKP_OK) {
+            VKZG_OK) {
             printf("FAIL: build_setup_tables\n");
             return 1;
         }
@@ -200,7 +200,7 @@ int main(int argc, char **argv) {
     test_circulant_equivalence(tables);
     test_split_circulant_equivalence(tables);
 
-    auto vectors = vkp_test::load_all(vec_dir);
+    auto vectors = vkzg_test::load_all(vec_dir);
     if (vectors.empty()) {
         printf("FAIL: no test vectors found in %s\n", vec_dir);
         return 1;
@@ -213,13 +213,13 @@ int main(int argc, char **argv) {
         // The library takes a fixed-size blob buffer, so a wrong length is the
         // caller's error to catch -- two of the spec vectors exercise exactly
         // that, and the harness stands in for the caller here.
-        vkp_result rc = v.blob.size() == (size_t)kFieldElementsPerBlob * kBytesPerFieldElement
+        vkzg_result rc = v.blob.size() == (size_t)kFieldElementsPerBlob * kBytesPerFieldElement
                               ? reference_compute(tables, v.blob.data(), proofs.data())
-                              : VKP_ERR_BADARGS;
+                              : VKZG_ERR_BADARGS;
         double ms = now_ms() - a;
 
         if (!v.valid) {
-            if (rc == VKP_OK) {
+            if (rc == VKZG_OK) {
                 printf("FAIL %s: expected rejection, got success\n", v.name.c_str());
                 g_failures++;
             } else {
@@ -227,7 +227,7 @@ int main(int argc, char **argv) {
             }
             continue;
         }
-        if (rc != VKP_OK) {
+        if (rc != VKZG_OK) {
             printf("FAIL %s: unexpected error %d\n", v.name.c_str(), (int)rc);
             g_failures++;
             continue;

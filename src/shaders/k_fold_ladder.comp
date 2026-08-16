@@ -12,7 +12,7 @@
 // Output layout matches what k_phase_b_split.comp and the (existing)
 // k_normalize.comp expect: positions [0, 64) are L+, positions [64, 128) are
 // L-, same per-blob stride as the unfolded ladder so the buffer this writes
-// into is a drop-in normalize source (see vulkan_prover.cpp).
+// into is a drop-in normalize source (see vkzg.cpp).
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #include "field.glsl.inc"

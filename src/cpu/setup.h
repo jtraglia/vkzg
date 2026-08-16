@@ -1,7 +1,7 @@
 // Trusted setup ingestion and FK20 table precomputation.
 #pragma once
 
-#include "../../include/vulkan_prover.h"
+#include "../../include/vkzg.h"
 #include "../internal.h"
 #include "bls12_381.h"
 
@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace vkp {
+namespace vkzg {
 
 // Everything the GPU needs, already in device limb layout so the vectors can
 // be handed straight to Vulkan buffers.
@@ -61,12 +61,12 @@ uint64_t compute_setup_digest(const uint8_t *g1_monomial_bytes, size_t len);
 
 // Decompresses the setup and derives every table. `validate` additionally runs
 // on-curve and subgroup checks on all 4096 points.
-vkp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool validate,
+vkzg_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool validate,
                                 SetupTables &out);
 
 // On-disk cache of the derived tables.
-vkp_result load_table_cache(const std::string &path, uint64_t expected_digest, SetupTables &out);
-vkp_result save_table_cache(const std::string &path, const SetupTables &in);
+vkzg_result load_table_cache(const std::string &path, uint64_t expected_digest, SetupTables &out);
+vkzg_result save_table_cache(const std::string &path, const SetupTables &in);
 
 // Exposed for tests: the fused IFFT/truncate/FFT circulant kernel, kappa[e].
 void compute_circulant_kernel(Fr kappa[kCirculantSize]);
@@ -80,4 +80,4 @@ void fr_fft(Fr *data, size_t n, const Fr *roots8192);
 // digits[d] lands in [-127, +128]; returns them as int32.
 void recode_scalar(int32_t digits[kNumDigits], const uint64_t canonical[4]);
 
-} // namespace vkp
+} // namespace vkzg

@@ -9,7 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace vkp {
+namespace vkzg {
 
 // ---------------------------------------------------------------- protocol
 constexpr int kFieldElementsPerBlob = L_FIELD_ELEMENTS_PER_BLOB;
@@ -62,4 +62,4 @@ constexpr size_t kPositionTableWords = (size_t)kPositionTablePoints * kAffineWor
 constexpr uint32_t kTableCacheVersion = 6;
 constexpr uint32_t kTableCacheMagic = 0x475A4B50; // "PKZG"
 
-} // namespace vkp
+} // namespace vkzg

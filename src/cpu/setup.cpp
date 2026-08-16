@@ -7,7 +7,7 @@
 #include <cstring>
 #include <thread>
 
-namespace vkp {
+namespace vkzg {
 namespace {
 
 // Convert host limbs to the device's 32-bit little-endian layout.
@@ -171,10 +171,10 @@ uint64_t compute_setup_digest(const uint8_t *g1_monomial_bytes, size_t len) {
 }
 
 
-vkp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool validate,
+vkzg_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool validate,
                                 SetupTables &out) {
-    if (!g1_monomial_bytes || len != (size_t)VKP_NUM_SETUP_G1_POINTS * VKP_BYTES_PER_G1) {
-        return VKP_ERR_BADARGS;
+    if (!g1_monomial_bytes || len != (size_t)VKZG_NUM_SETUP_G1_POINTS * VKZG_BYTES_PER_G1) {
+        return VKZG_ERR_BADARGS;
     }
     out.setup_digest = compute_setup_digest(g1_monomial_bytes, len);
 
@@ -183,13 +183,13 @@ vkp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool
     std::vector<uint8_t> ok(kFieldElementsPerBlob, 0);
     parallel_for(kFieldElementsPerBlob, [&](size_t i) {
         G1Affine a;
-        if (!g1_decompress(a, g1_monomial_bytes + i * VKP_BYTES_PER_G1)) return;
+        if (!g1_decompress(a, g1_monomial_bytes + i * VKZG_BYTES_PER_G1)) return;
         if (validate && !(g1_affine_is_on_curve(a) && g1_affine_in_subgroup(a))) return;
         setup_affine[i] = a;
         ok[i] = 1;
     });
     for (int i = 0; i < kFieldElementsPerBlob; i++) {
-        if (!ok[i]) return VKP_ERR_SETUP;
+        if (!ok[i]) return VKZG_ERR_SETUP;
     }
 
     // ---------------------------------------------------------- roots of unity
@@ -200,7 +200,7 @@ vkp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool
         fr_root_of_unity(w, 13);
         roots[0] = kFrOne;
         for (int i = 1; i <= kFieldElementsPerExtBlob; i++) fr_mul(roots[i], roots[i - 1], w);
-        if (!fr_eq(roots[kFieldElementsPerExtBlob], kFrOne)) return VKP_ERR_SETUP;
+        if (!fr_eq(roots[kFieldElementsPerExtBlob], kFrOne)) return VKZG_ERR_SETUP;
         for (int i = 0; i <= kFieldElementsPerExtBlob; i++) {
             roots_inv[i] = roots[kFieldElementsPerExtBlob - i];
         }
@@ -270,7 +270,7 @@ vkp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool
     auto build_kernel_items = [](const Fr *kappa, int size, int expected_taps,
                                   std::vector<uint32_t> &items_out,
                                   std::vector<uint32_t> &offsets_out,
-                                  std::vector<uint32_t> &perm_out) -> vkp_result {
+                                  std::vector<uint32_t> &perm_out) -> vkzg_result {
         struct Item {
             uint32_t bucket; // |digit| - 1
             uint32_t packed; // tap | position << 8 | sign << 16
@@ -293,7 +293,7 @@ vkp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool
             }
             tap++;
         }
-        if (tap != expected_taps) return VKP_ERR_SETUP;
+        if (tap != expected_taps) return VKZG_ERR_SETUP;
 
         std::stable_sort(items.begin(), items.end(),
                          [](const Item &a, const Item &b) { return a.bucket < b.bucket; });
@@ -316,14 +316,14 @@ vkp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool
             return counts[x] > counts[y];
         });
         perm_out = order;
-        return VKP_OK;
+        return VKZG_OK;
     };
 
     Fr kappa[kCirculantSize];
     compute_circulant_kernel(kappa);
-    vkp_result rc = build_kernel_items(kappa, kCirculantSize, kPhaseBTerms, out.kernel_items,
+    vkzg_result rc = build_kernel_items(kappa, kCirculantSize, kPhaseBTerms, out.kernel_items,
                                           out.kernel_offsets, out.kernel_perm);
-    if (rc != VKP_OK) return rc;
+    if (rc != VKZG_OK) return rc;
 
     // Split form: X^128-1 = (X^64-1)(X^64+1). kappa+[i] = (kappa[i] +
     // kappa[i+64])/2, kappa-[i] = (kappa[i] - kappa[i+64])/2 for i in [0,64);
@@ -346,13 +346,13 @@ vkp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool
         }
         rc = build_kernel_items(kappa_plus, kCirculantHalf, kPhaseBHalfTerms, out.kernel_items_plus,
                                 out.kernel_offsets_plus, out.kernel_perm_plus);
-        if (rc != VKP_OK) return rc;
+        if (rc != VKZG_OK) return rc;
         rc = build_kernel_items(kappa_minus, kCirculantHalf, kPhaseBHalfTerms, out.kernel_items_minus,
                                 out.kernel_offsets_minus, out.kernel_perm_minus);
-        if (rc != VKP_OK) return rc;
+        if (rc != VKZG_OK) return rc;
     }
 
-    return VKP_OK;
+    return VKZG_OK;
 }
 
 // ------------------------------------------------------------------- cache
@@ -387,11 +387,11 @@ bool write_vec(FILE *f, const std::vector<T> &v) {
 }
 } // namespace
 
-vkp_result load_table_cache(const std::string &path, uint64_t expected_digest, SetupTables &out) {
+vkzg_result load_table_cache(const std::string &path, uint64_t expected_digest, SetupTables &out) {
     FILE *f = fopen(path.c_str(), "rb");
-    if (!f) return VKP_ERR_IO;
+    if (!f) return VKZG_ERR_IO;
     CacheHeader h{};
-    vkp_result rc = VKP_ERR_IO;
+    vkzg_result rc = VKZG_ERR_IO;
     if (!read_exact(f, &h, sizeof(h))) goto done;
     if (h.magic != kTableCacheMagic || h.version != kTableCacheVersion ||
         h.setup_digest != expected_digest || h.position_words != kPositionTableWords) {
@@ -413,16 +413,16 @@ vkp_result load_table_cache(const std::string &path, uint64_t expected_digest, S
         !read_exact(f, out.inv_blob, sizeof(out.inv_blob))) {
         goto done;
     }
-    rc = VKP_OK;
+    rc = VKZG_OK;
 done:
     fclose(f);
     return rc;
 }
 
-vkp_result save_table_cache(const std::string &path, const SetupTables &in) {
+vkzg_result save_table_cache(const std::string &path, const SetupTables &in) {
     const std::string tmp = path + ".tmp";
     FILE *f = fopen(tmp.c_str(), "wb");
-    if (!f) return VKP_ERR_IO;
+    if (!f) return VKZG_ERR_IO;
     CacheHeader h{};
     h.magic = kTableCacheMagic;
     h.version = kTableCacheVersion;
@@ -447,13 +447,13 @@ vkp_result save_table_cache(const std::string &path, const SetupTables &in) {
     fclose(f);
     if (!ok) {
         remove(tmp.c_str());
-        return VKP_ERR_IO;
+        return VKZG_ERR_IO;
     }
     if (rename(tmp.c_str(), path.c_str()) != 0) {
         remove(tmp.c_str());
-        return VKP_ERR_IO;
+        return VKZG_ERR_IO;
     }
-    return VKP_OK;
+    return VKZG_OK;
 }
 
-} // namespace vkp
+} // namespace vkzg

@@ -12,7 +12,7 @@
 //
 // L_REDUCE_LANES is a specialization constant, not a macro: this same
 // SPIR-V module backs two VkPipelines (see buildPipelines in
-// vulkan_prover.cpp), one for each lane count the tuning below found worth
+// vkzg.cpp), one for each lane count the tuning below found worth
 // keeping. More lanes means a shorter serial per-thread chain in
 // reduce_buckets (good when a dispatch is latency-bound: few enough total
 // workgroups, relative to the GPU's actual core count, that there's nothing

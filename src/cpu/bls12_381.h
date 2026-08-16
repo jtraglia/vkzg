@@ -13,7 +13,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace vkp {
+namespace vkzg {
 
 struct Fp {
     uint64_t v[6];
@@ -121,4 +121,4 @@ void g1_affine_endo(G1Affine &out, const G1Affine &in);
 void batch_inverse(Fp *out, const Fp *in, size_t n);
 uint32_t bit_reverse(uint32_t x, uint32_t bits);
 
-} // namespace vkp
+} // namespace vkzg

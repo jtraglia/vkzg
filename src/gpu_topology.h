@@ -1,13 +1,13 @@
 // Best-effort query of a GPU's real execution-core count, used to size
-// dispatch shapes (see recordReduce in vulkan_prover.cpp) from actual
+// dispatch shapes (see recordReduce in vkzg.cpp) from actual
 // hardware topology instead of a hardcoded constant or a device-name guess.
-#ifndef VULKAN_PROVER_GPU_TOPOLOGY_H
-#define VULKAN_PROVER_GPU_TOPOLOGY_H
+#ifndef VKZG_GPU_TOPOLOGY_H
+#define VKZG_GPU_TOPOLOGY_H
 
 #include <cstdint>
 #include <vulkan/vulkan.h>
 
-namespace vkp {
+namespace vkzg {
 
 // Returns the GPU's total shader-core count (clusters * cores-per-cluster
 // for multi-cluster designs), or 0 if it can't be determined -- e.g. on a
@@ -17,6 +17,6 @@ namespace vkp {
 // required for correctness, only used to pick a better-tuned dispatch shape.
 uint32_t queryGpuTotalCores(VkPhysicalDevice physDev);
 
-} // namespace vkp
+} // namespace vkzg
 
-#endif // VULKAN_PROVER_GPU_TOPOLOGY_H
+#endif // VKZG_GPU_TOPOLOGY_H

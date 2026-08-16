@@ -1,9 +1,9 @@
-# vulkan-prover
+# vkzg
 
 EIP-7594 cell KZG proof generation for Ethereum blobs, on the GPU via Vulkan
 compute.
 
-Given a blob, `vulkan-prover` produces all 128 cell proofs. It is built for
+Given a blob, `vkzg` produces all 128 cell proofs. It is built for
 supernodes, which generate proofs constantly and care about throughput.
 Computing the cells themselves (as opposed to their proofs) is cheap on a CPU
 and deliberately out of scope here, as is proof *verification* — this
@@ -113,25 +113,25 @@ Nothing to download or configure at runtime: the trusted setup is compiled
 in, and so is the compiled SPIR-V.
 
 ```c
-#include "vulkan_prover.h"
+#include "vkzg.h"
 
-vkp_options opts;
-vkp_options_default(&opts);
-opts.table_cache_path = "/var/cache/vulkan-prover/tables.bin";  /* seconds to build, ~60ms to load */
+vkzg_options opts;
+vkzg_options_default(&opts);
+opts.table_cache_path = "/var/cache/vkzg/tables.bin";  /* seconds to build, ~60ms to load */
 opts.max_batch_size = 16;
 
-vkp_prover *prover;
-vkp_prover_new_default(&prover, &opts);   /* mainnet setup is compiled in */
+vkzg_prover *prover;
+vkzg_prover_new_default(&prover, &opts);   /* mainnet setup is compiled in */
 
 /* one blob -> 128 cell proofs */
-vkp_compute_proofs(prover, proofs, blob);
+vkzg_compute_proofs(prover, proofs, blob);
 
 /* or a batch, which is markedly more efficient per blob */
-vkp_compute_proofs_batch(prover, proofs, blobs, n);
+vkzg_compute_proofs_batch(prover, proofs, blobs, n);
 ```
 
-The whole API is in [`include/vulkan_prover.h`](include/vulkan_prover.h) and is plain C, so
-Rust / Go / Java bindings need no C++ shim. A `vkp_prover` is safe to share
+The whole API is in [`include/vkzg.h`](include/vkzg.h) and is plain C, so
+Rust / Go / Java bindings need no C++ shim. A `vkzg_prover` is safe to share
 between threads; calls serialise internally on the GPU queue.
 
 ### The trusted setup
@@ -140,7 +140,7 @@ The mainnet ceremony's monomial G1 points are **compiled into the library** —
 4096 compressed points, 192 KiB, in `src/setup_data.cpp`. The Lagrange G1
 points are for commitments and the G2 points for verification, neither of which
 this library does, so neither is carried. There is no file to ship, locate or
-validate at runtime, and `vkp_prover_new_default()` is all a caller needs.
+validate at runtime, and `vkzg_prover_new_default()` is all a caller needs.
 
 Provenance is checkable: the generated header records the sha256 of the bytes
 (`08797579f6cfd578…`), and `tools/embed_setup.py` regenerates them from a
@@ -148,7 +148,7 @@ canonical `trusted_setup.txt` so anyone can confirm the blob matches the
 ceremony output. The whole test suite runs against the embedded setup, so the
 spec vectors passing is itself evidence the points are right.
 
-`vkp_prover_new()` takes raw setup bytes if you ever need to target a
+`vkzg_prover_new()` takes raw setup bytes if you ever need to target a
 different ceremony.
 
 Deriving the FK20 tables from the setup takes a couple of seconds on this
@@ -265,7 +265,7 @@ and the code still reflects them (unverified under Vulkan so far):
 - **Jacobian → affine** needs a field inversion, which is ~570 multiplies deep
   by Fermat: a fixed multi-millisecond latency however many points there are.
   Montgomery's trick amortises one inversion over a chunk of points, and the
-  chunk size (`inversionChunk` in `src/vulkan_prover.cpp`) is chosen from the
+  chunk size (`inversionChunk` in `src/vkzg.cpp`) is chosen from the
   point count so the dispatch stays busy on a bigger GPU instead of
   inheriting this machine's shape.
 - **Proof compression** (bit-reversal, canonical form, 48-byte encoding) is
@@ -376,7 +376,7 @@ winning at batch 64 on the Ultra.
 
 So it isn't a fixed value at all. `k_bucket_reduce.comp` declares its lane
 count as a specialization constant (`kSpecReduceLanes`), and `buildPipelines`
-(`src/vulkan_prover.cpp`) creates two `VkPipeline`s from the same SPIR-V
+(`src/vkzg.cpp`) creates two `VkPipeline`s from the same SPIR-V
 module — one at the default lane count, one at double it — rather than
 compiling two shader variants. `recordReduce` picks between them on every
 dispatch from the batch size *and* the GPU's real core count.
@@ -476,12 +476,12 @@ splitting phase B's convolution in two — is its own section, see
 
 Still open, in roughly the order worth checking next:
 
-- **`inversionChunk`'s target thread count** (in `src/vulkan_prover.cpp`) was
+- **`inversionChunk`'s target thread count** (in `src/vkzg.cpp`) was
   chosen to match Metal's occupancy shape and hasn't been independently
   re-swept on this driver, even though `normalize_ladder`/`normalize_proofs`
   turned out to be cheap here (~1% combined) so it's a low-priority check.
 - **The pipeline barrier after every dispatch** (`barrier()` in
-  `src/vulkan_prover.cpp`) is deliberately conservative — a full read/write
+  `src/vkzg.cpp`) is deliberately conservative — a full read/write
   memory barrier on every stage boundary, rather than the minimal set
   Metal's automatic hazard tracking would have inferred. Narrowing these to
   only the buffers each stage actually depends on is unexplored.
@@ -516,13 +516,13 @@ reasonable starting assumption here too, but untested.
 ## Layout
 
 ```
-include/vulkan_prover.h public C API (vkp_* / VKP_*)
+include/vkzg.h          public C API (vkzg_* / VKZG_*)
 src/layout_defs.h       sizes shared by host and shaders (single source of truth)
 src/setup_data.{h,cpp}  the mainnet trusted setup, generated by tools/embed_setup.py
 src/shaders/            GLSL compute: field.glsl.inc (F_p/F_r/G1), k_*.comp (one file per kernel)
 src/cpu/                host BLS12-381, trusted setup and FK20 table derivation
 src/cpu/reference.cpp   CPU implementation of the exact same pipeline, for tests
-src/vulkan_prover.cpp   Vulkan host layer and dispatch scheduling
+src/vkzg.cpp            Vulkan host layer and dispatch scheduling
 tools/                  constant, shader and trusted-setup generators
 tests/                  unit tests, spec vectors, GPU end-to-end
 bench/                  latency/throughput benchmark, per-stage profiler

@@ -458,7 +458,7 @@ G1 g1_shuffle_down(G1 p, uint delta) {
 // lanes with a shuffle tree.  `lanes` is a specialization constant at the
 // call site (k_bucket_reduce.comp), not a compile-time macro here, so the
 // same shader binary can be instantiated as more than one PSO -- see that
-// file and recordReduce in vulkan_prover.cpp for why the lane count varies
+// file and recordReduce in vkzg.cpp for why the lane count varies
 // per dispatch. The maths is unchanged from the Metal original.
 G1 reduce_buckets(U32Buf buckets, uint base, uint pos, uint lanes) {
     const uint per_lane = L_NUM_BUCKETS / lanes;

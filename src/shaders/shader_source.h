@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace vkp {
+namespace vkzg {
 
 struct ShaderSpv {
     const char *name;
@@ -8986,4 +8986,4 @@ inline const ShaderSpv kShaders[] = {
 
 inline constexpr size_t kShaderCount = sizeof(kShaders) / sizeof(kShaders[0]);
 
-} // namespace vkp
+} // namespace vkzg

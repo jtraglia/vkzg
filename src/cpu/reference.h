@@ -11,11 +11,11 @@
 
 #include <vector>
 
-namespace vkp {
+namespace vkzg {
 
 
 // Full pipeline: blob -> 128 cell proofs.
-vkp_result reference_compute(const SetupTables &tables, const uint8_t *blob, uint8_t *proofs);
+vkzg_result reference_compute(const SetupTables &tables, const uint8_t *blob, uint8_t *proofs);
 void phase_b_circulant(G1 *out, const G1 *u, const SetupTables &tables);
 
 // The straightforward c-kzg-shaped implementation of phase B (G1 inverse
@@ -24,4 +24,4 @@ void phase_b_circulant(G1 *out, const G1 *u, const SetupTables &tables);
 void phase_b_via_g1_ffts(G1 *out, const G1 *u, const SetupTables &tables);
 
 
-} // namespace vkp
+} // namespace vkzg

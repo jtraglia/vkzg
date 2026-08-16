@@ -7,7 +7,7 @@
 // unified memory) and persistently mapped, and its VkDeviceAddress is fetched
 // once at allocation time. This keeps the dispatch code below close in shape
 // to the Metal original, which passed buffers the same way.
-#include "vulkan_prover.h"
+#include "vkzg.h"
 #include "cpu/bls12_381.h"
 #include "cpu/setup.h"
 #include "gpu_topology.h"
@@ -29,7 +29,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-using namespace vkp;
+using namespace vkzg;
 
 namespace {
 
@@ -107,7 +107,7 @@ struct VkBuf {
 
 } // namespace
 
-struct vkp_prover {
+struct vkzg_prover {
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physDev = VK_NULL_HANDLE;
     VkDevice device = VK_NULL_HANDLE;
@@ -151,32 +151,32 @@ struct vkp_prover {
 
     StageTimes lastStage; // filled by computeBatch, read by profile_batch
 
-    ~vkp_prover();
+    ~vkzg_prover();
 };
 
 // --------------------------------------------------------------------- utils
 
-const char *vkp_error_string(vkp_result r) {
+const char *vkzg_error_string(vkzg_result r) {
     switch (r) {
-        case VKP_OK: return "ok";
-        case VKP_ERR_BADARGS: return "invalid argument";
-        case VKP_ERR_MALLOC: return "allocation failed";
-        case VKP_ERR_IO: return "i/o error";
-        case VKP_ERR_SETUP: return "malformed trusted setup";
-        case VKP_ERR_GPU: return "gpu error";
-        case VKP_ERR_INVALID_BLOB: return "blob contains a non-canonical field element";
+        case VKZG_OK: return "ok";
+        case VKZG_ERR_BADARGS: return "invalid argument";
+        case VKZG_ERR_MALLOC: return "allocation failed";
+        case VKZG_ERR_IO: return "i/o error";
+        case VKZG_ERR_SETUP: return "malformed trusted setup";
+        case VKZG_ERR_GPU: return "gpu error";
+        case VKZG_ERR_INVALID_BLOB: return "blob contains a non-canonical field element";
     }
     return "unknown error";
 }
 
-void vkp_options_default(vkp_options *opts) {
+void vkzg_options_default(vkzg_options *opts) {
     if (!opts) return;
     opts->table_cache_path = nullptr;
     opts->validate_setup = 0;
     opts->max_batch_size = 0;
 }
 
-const char *vkp_prover_device_name(const vkp_prover *p) {
+const char *vkzg_prover_device_name(const vkzg_prover *p) {
     return p ? p->deviceName.c_str() : "";
 }
 
@@ -241,10 +241,10 @@ void destroyBuffer(VkDevice device, VkBuf &b) {
     b = VkBuf{};
 }
 
-bool allocateWorkingSet(vkp_prover *p, uint32_t batch) {
+bool allocateWorkingSet(vkzg_prover *p, uint32_t batch) {
     const size_t B = batch;
     bool ok = true;
-    ok &= createBuffer(p->device, p->physDev, B * VKP_BYTES_PER_BLOB, p->bufBlob);
+    ok &= createBuffer(p->device, p->physDev, B * VKZG_BYTES_PER_BLOB, p->bufBlob);
     ok &= createBuffer(p->device, p->physDev, B * kFieldElementsPerBlob * kFrLimbs * 4, p->bufLagrange);
     ok &= createBuffer(p->device, p->physDev, B * kFieldElementsPerExtBlob * kFrLimbs * 4, p->bufWorkA);
     ok &= createBuffer(p->device, p->physDev, B * kFieldElementsPerExtBlob * kFrLimbs * 4, p->bufPolyExt);
@@ -263,7 +263,7 @@ bool allocateWorkingSet(vkp_prover *p, uint32_t batch) {
     ok &= createBuffer(p->device, p->physDev,
                        B * kCirculantSize * kLadderPositions * kAffineWords * 4, p->bufLadderAff);
     ok &= createBuffer(p->device, p->physDev, B * kCirculantSize * kAffineWords * 4, p->bufProofsAff);
-    ok &= createBuffer(p->device, p->physDev, B * kCirculantSize * VKP_BYTES_PER_PROOF, p->bufProofBytes);
+    ok &= createBuffer(p->device, p->physDev, B * kCirculantSize * VKZG_BYTES_PER_PROOF, p->bufProofBytes);
     // Prefix products for the batched inversion; sized for the larger of the
     // two normalisation passes.
     ok &= createBuffer(p->device, p->physDev,
@@ -275,7 +275,7 @@ bool allocateWorkingSet(vkp_prover *p, uint32_t batch) {
     return true;
 }
 
-void freeWorkingSet(vkp_prover *p) {
+void freeWorkingSet(vkzg_prover *p) {
     destroyBuffer(p->device, p->bufBlob);
     destroyBuffer(p->device, p->bufLagrange);
     destroyBuffer(p->device, p->bufWorkA);
@@ -298,7 +298,7 @@ void freeWorkingSet(vkp_prover *p) {
 
 } // namespace
 
-vkp_prover::~vkp_prover() {
+vkzg_prover::~vkzg_prover() {
     if (device == VK_NULL_HANDLE) return;
     vkDeviceWaitIdle(device);
     freeWorkingSet(this);
@@ -409,7 +409,7 @@ VkPhysicalDevice pickPhysicalDevice(VkInstance instance, uint32_t &queueFamilyOu
     return best;
 }
 
-vkp_result buildPipelines(vkp_prover *p) {
+vkzg_result buildPipelines(vkzg_prover *p) {
     struct {
         const char *name;
         VkPipeline *slot;
@@ -436,7 +436,7 @@ vkp_result buildPipelines(vkp_prover *p) {
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pcRange;
     if (vkCreatePipelineLayout(p->device, &layoutInfo, nullptr, &p->pipelineLayout) != VK_SUCCESS) {
-        return VKP_ERR_GPU;
+        return VKZG_ERR_GPU;
     }
 
     for (auto &k : kernels) {
@@ -447,14 +447,14 @@ vkp_result buildPipelines(vkp_prover *p) {
                 break;
             }
         }
-        if (!spv) return VKP_ERR_GPU;
+        if (!spv) return VKZG_ERR_GPU;
 
         VkShaderModuleCreateInfo modInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         modInfo.codeSize = spv->words * 4;
         modInfo.pCode = spv->code;
         VkShaderModule module = VK_NULL_HANDLE;
         if (vkCreateShaderModule(p->device, &modInfo, nullptr, &module) != VK_SUCCESS) {
-            return VKP_ERR_GPU;
+            return VKZG_ERR_GPU;
         }
 
         VkPipelineShaderStageCreateInfo stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
@@ -468,7 +468,7 @@ vkp_result buildPipelines(vkp_prover *p) {
         const VkResult rc =
             vkCreateComputePipelines(p->device, VK_NULL_HANDLE, 1, &pipeInfo, nullptr, k.slot);
         vkDestroyShaderModule(p->device, module, nullptr);
-        if (rc != VK_SUCCESS) return VKP_ERR_GPU;
+        if (rc != VK_SUCCESS) return VKZG_ERR_GPU;
     }
 
     // k_bucket_reduce is special: one SPIR-V module, two VkPipelines that
@@ -484,14 +484,14 @@ vkp_result buildPipelines(vkp_prover *p) {
                 break;
             }
         }
-        if (!spv) return VKP_ERR_GPU;
+        if (!spv) return VKZG_ERR_GPU;
 
         VkShaderModuleCreateInfo modInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         modInfo.codeSize = spv->words * 4;
         modInfo.pCode = spv->code;
         VkShaderModule module = VK_NULL_HANDLE;
         if (vkCreateShaderModule(p->device, &modInfo, nullptr, &module) != VK_SUCCESS) {
-            return VKP_ERR_GPU;
+            return VKZG_ERR_GPU;
         }
 
         const uint32_t lanesThroughput = L_REDUCE_LANES;
@@ -522,30 +522,30 @@ vkp_result buildPipelines(vkp_prover *p) {
         const VkResult rc = vkCreateComputePipelines(p->device, VK_NULL_HANDLE, 2, pipeInfos,
                                                       nullptr, pipelines);
         vkDestroyShaderModule(p->device, module, nullptr);
-        if (rc != VK_SUCCESS) return VKP_ERR_GPU;
+        if (rc != VK_SUCCESS) return VKZG_ERR_GPU;
         p->psoReduceThroughput = pipelines[0];
         p->psoReduceLatency = pipelines[1];
     }
-    return VKP_OK;
+    return VKZG_OK;
 }
 
-vkp_result createProver(vkp_prover **out, SetupTables &tables, const vkp_options *opts) {
-    auto *p = new vkp_prover();
+vkzg_result createProver(vkzg_prover **out, SetupTables &tables, const vkzg_options *opts) {
+    auto *p = new vkzg_prover();
 
     VkApplicationInfo appInfo{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    appInfo.pApplicationName = "vulkan-prover";
+    appInfo.pApplicationName = "vkzg";
     appInfo.apiVersion = VK_API_VERSION_1_2;
     VkInstanceCreateInfo instInfo{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     instInfo.pApplicationInfo = &appInfo;
     if (vkCreateInstance(&instInfo, nullptr, &p->instance) != VK_SUCCESS) {
         delete p;
-        return VKP_ERR_GPU;
+        return VKZG_ERR_GPU;
     }
 
     p->physDev = pickPhysicalDevice(p->instance, p->queueFamily);
     if (p->physDev == VK_NULL_HANDLE) {
         delete p;
-        return VKP_ERR_GPU;
+        return VKZG_ERR_GPU;
     }
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(p->physDev, &props);
@@ -576,7 +576,7 @@ vkp_result createProver(vkp_prover **out, SetupTables &tables, const vkp_options
     devInfo.pQueueCreateInfos = &queueInfo;
     if (vkCreateDevice(p->physDev, &devInfo, nullptr, &p->device) != VK_SUCCESS) {
         delete p;
-        return VKP_ERR_GPU;
+        return VKZG_ERR_GPU;
     }
     vkGetDeviceQueue(p->device, p->queueFamily, 0, &p->queue);
 
@@ -585,7 +585,7 @@ vkp_result createProver(vkp_prover **out, SetupTables &tables, const vkp_options
     poolInfo.queueFamilyIndex = p->queueFamily;
     if (vkCreateCommandPool(p->device, &poolInfo, nullptr, &p->cmdPool) != VK_SUCCESS) {
         delete p;
-        return VKP_ERR_GPU;
+        return VKZG_ERR_GPU;
     }
     VkCommandBufferAllocateInfo cmdAlloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     cmdAlloc.commandPool = p->cmdPool;
@@ -593,17 +593,17 @@ vkp_result createProver(vkp_prover **out, SetupTables &tables, const vkp_options
     cmdAlloc.commandBufferCount = 1;
     if (vkAllocateCommandBuffers(p->device, &cmdAlloc, &p->cmdBuf) != VK_SUCCESS) {
         delete p;
-        return VKP_ERR_GPU;
+        return VKZG_ERR_GPU;
     }
 
     VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     if (vkCreateFence(p->device, &fenceInfo, nullptr, &p->fence) != VK_SUCCESS) {
         delete p;
-        return VKP_ERR_GPU;
+        return VKZG_ERR_GPU;
     }
 
-    vkp_result rc = buildPipelines(p);
-    if (rc != VKP_OK) {
+    vkzg_result rc = buildPipelines(p);
+    if (rc != VKZG_OK) {
         delete p;
         return rc;
     }
@@ -629,26 +629,26 @@ vkp_result createProver(vkp_prover **out, SetupTables &tables, const vkp_options
                            tables.kernel_perm_minus.size() * 4, p->bufKernelPermMinus);
     if (!ok) {
         delete p;
-        return VKP_ERR_MALLOC;
+        return VKZG_ERR_MALLOC;
     }
     memcpy(p->invBlob, tables.inv_blob, sizeof(p->invBlob));
 
     uint32_t batch = opts && opts->max_batch_size ? opts->max_batch_size : 4;
     if (!allocateWorkingSet(p, batch)) {
         delete p;
-        return VKP_ERR_MALLOC;
+        return VKZG_ERR_MALLOC;
     }
     *out = p;
-    return VKP_OK;
+    return VKZG_OK;
 }
 
 } // namespace
 
 // --------------------------------------------------------------- constructors
 
-vkp_result vkp_prover_new(vkp_prover **out, const uint8_t *g1_monomial_bytes,
-                              size_t g1_monomial_len, const vkp_options *opts) {
-    if (!out || !g1_monomial_bytes) return VKP_ERR_BADARGS;
+vkzg_result vkzg_prover_new(vkzg_prover **out, const uint8_t *g1_monomial_bytes,
+                              size_t g1_monomial_len, const vkzg_options *opts) {
+    if (!out || !g1_monomial_bytes) return VKZG_ERR_BADARGS;
     *out = nullptr;
 
     SetupTables tables;
@@ -660,22 +660,22 @@ vkp_result vkp_prover_new(vkp_prover **out, const uint8_t *g1_monomial_bytes,
     bool have = false;
     if (cache) {
         const uint64_t digest = compute_setup_digest(g1_monomial_bytes, g1_monomial_len);
-        have = load_table_cache(cache, digest, tables) == VKP_OK;
+        have = load_table_cache(cache, digest, tables) == VKZG_OK;
     }
     if (!have) {
-        vkp_result rc = build_setup_tables(g1_monomial_bytes, g1_monomial_len, validate, tables);
-        if (rc != VKP_OK) return rc;
+        vkzg_result rc = build_setup_tables(g1_monomial_bytes, g1_monomial_len, validate, tables);
+        if (rc != VKZG_OK) return rc;
         if (cache) save_table_cache(cache, tables);
     }
 
     return createProver(out, tables, opts);
 }
 
-vkp_result vkp_prover_new_default(vkp_prover **out, const vkp_options *opts) {
-    return vkp_prover_new(out, kEmbeddedSetupG1Monomial, kEmbeddedSetupSize, opts);
+vkzg_result vkzg_prover_new_default(vkzg_prover **out, const vkzg_options *opts) {
+    return vkzg_prover_new(out, kEmbeddedSetupG1Monomial, kEmbeddedSetupSize, opts);
 }
 
-void vkp_prover_free(vkp_prover *p) { delete p; }
+void vkzg_prover_free(vkzg_prover *p) { delete p; }
 
 // -------------------------------------------------------------------- compute
 
@@ -698,7 +698,7 @@ void dispatch(VkCommandBuffer cmd, VkPipeline pso, VkPipelineLayout layout, cons
     barrier(cmd);
 }
 
-void recordNtt(VkCommandBuffer cmd, vkp_prover *p, const VkBuf &out, const VkBuf &in,
+void recordNtt(VkCommandBuffer cmd, vkzg_prover *p, const VkBuf &out, const VkBuf &in,
               const VkBuf &roots, const NttParams &params, uint32_t count, uint32_t batch) {
     NttParams pc = params;
     pc.outAddr = out.addr;
@@ -786,7 +786,7 @@ bool useLatencyReduce(uint32_t count, uint32_t batch, uint32_t gpuTotalCores) {
     return workgroupsAtDefault < (uint64_t)kWorkgroupsPerCoreThreshold * gpuTotalCores;
 }
 
-void recordReduce(VkCommandBuffer cmd, vkp_prover *p, const VkBuf &out, uint32_t count,
+void recordReduce(VkCommandBuffer cmd, vkzg_prover *p, const VkBuf &out, uint32_t count,
                   uint32_t batch) {
     const bool latency = useLatencyReduce(count, batch, p->gpuTotalCores);
     const uint32_t lanes = latency ? (L_REDUCE_LANES * 2) : L_REDUCE_LANES;
@@ -803,7 +803,7 @@ struct NormalizePC {
     uint32_t chunk;
 };
 
-void recordNormalize(VkCommandBuffer cmd, vkp_prover *p, const VkBuf &outAffine,
+void recordNormalize(VkCommandBuffer cmd, vkzg_prover *p, const VkBuf &outAffine,
                      const VkBuf &inJacobian, uint32_t count, uint32_t chunk) {
     NormalizePC pc{outAffine.addr, inJacobian.addr, p->bufNormScratch.addr, count, chunk};
     const uint32_t threads = (count + chunk - 1) / chunk;
@@ -826,7 +826,7 @@ void recordNormalize(VkCommandBuffer cmd, vkp_prover *p, const VkBuf &outAffine,
 // the two MSM phases dominate, as expected — so the timestamp path was
 // mismeasuring on this driver, not the kernels misbehaving. Given that, this
 // slower-but-trustworthy approach is what `profile_stages` uses.
-double flushAndTime(vkp_prover *p, VkCommandBuffer &cmd, double &prev) {
+double flushAndTime(vkzg_prover *p, VkCommandBuffer &cmd, double &prev) {
     vkEndCommandBuffer(cmd);
     vkResetFences(p->device, 1, &p->fence);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -845,12 +845,12 @@ double flushAndTime(vkp_prover *p, VkCommandBuffer &cmd, double &prev) {
     return delta;
 }
 
-vkp_result computeBatch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs, uint32_t batch,
+vkzg_result computeBatch(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs, uint32_t batch,
                         bool profile) {
     StageTimes &st = p->lastStage;
     st = StageTimes{};
     const double tStart = nowMs();
-    memcpy(p->bufBlob.mapped, blobs, (size_t)batch * VKP_BYTES_PER_BLOB);
+    memcpy(p->bufBlob.mapped, blobs, (size_t)batch * VKZG_BYTES_PER_BLOB);
     *(uint32_t *)p->bufErr.mapped = 0;
 
     vkResetCommandBuffer(p->cmdBuf, 0);
@@ -986,40 +986,40 @@ vkp_result computeBatch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs, ui
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cmd;
-    if (vkQueueSubmit(p->queue, 1, &submit, p->fence) != VK_SUCCESS) return VKP_ERR_GPU;
+    if (vkQueueSubmit(p->queue, 1, &submit, p->fence) != VK_SUCCESS) return VKZG_ERR_GPU;
     if (vkWaitForFences(p->device, 1, &p->fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
-        return VKP_ERR_GPU;
+        return VKZG_ERR_GPU;
     }
 
-    if (*(uint32_t *)p->bufErr.mapped != 0) return VKP_ERR_INVALID_BLOB;
+    if (*(uint32_t *)p->bufErr.mapped != 0) return VKZG_ERR_INVALID_BLOB;
 
-    memcpy(proofs, p->bufProofBytes.mapped, (size_t)batch * kCirculantSize * VKP_BYTES_PER_PROOF);
+    memcpy(proofs, p->bufProofBytes.mapped, (size_t)batch * kCirculantSize * VKZG_BYTES_PER_PROOF);
     st.total = nowMs() - tStart;
-    return VKP_OK;
+    return VKZG_OK;
 }
 
 } // namespace
 
-vkp_result vkp_compute_proofs(vkp_prover *p, uint8_t *proofs, const uint8_t *blob) {
-    return vkp_compute_proofs_batch(p, proofs, blob, 1);
+vkzg_result vkzg_compute_proofs(vkzg_prover *p, uint8_t *proofs, const uint8_t *blob) {
+    return vkzg_compute_proofs_batch(p, proofs, blob, 1);
 }
 
-vkp_result vkp_compute_proofs_batch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs,
+vkzg_result vkzg_compute_proofs_batch(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs,
                                         size_t num_blobs) {
-    if (!p || !blobs || !proofs) return VKP_ERR_BADARGS;
-    if (num_blobs == 0) return VKP_OK;
+    if (!p || !blobs || !proofs) return VKZG_ERR_BADARGS;
+    if (num_blobs == 0) return VKZG_OK;
 
     std::lock_guard<std::mutex> lock(p->mutex);
-    const size_t proofBytes = (size_t)kCirculantSize * VKP_BYTES_PER_PROOF;
+    const size_t proofBytes = (size_t)kCirculantSize * VKZG_BYTES_PER_PROOF;
 
     for (size_t done = 0; done < num_blobs;) {
         const uint32_t batch = (uint32_t)std::min<size_t>(p->maxBatch, num_blobs - done);
-        vkp_result rc = computeBatch(p, proofs + done * proofBytes, blobs + done * VKP_BYTES_PER_BLOB,
+        vkzg_result rc = computeBatch(p, proofs + done * proofBytes, blobs + done * VKZG_BYTES_PER_BLOB,
                                        batch, /*profile=*/false);
-        if (rc != VKP_OK) return rc;
+        if (rc != VKZG_OK) return rc;
         done += batch;
     }
-    return VKP_OK;
+    return VKZG_OK;
 }
 
 // ------------------------------------------------------------------ profiling
@@ -1029,15 +1029,15 @@ vkp_result vkp_compute_proofs_batch(vkp_prover *p, uint8_t *proofs, const uint8_
 // matters here rather than a separate re-implementation of the dispatch order.
 #include "profile.h"
 
-namespace vkp {
+namespace vkzg {
 
-vkp_result profile_batch(vkp_prover *p, unsigned char *proofs, const unsigned char *blobs,
+vkzg_result profile_batch(vkzg_prover *p, unsigned char *proofs, const unsigned char *blobs,
                            unsigned batch, StageTimes &out) {
-    if (!p || !blobs) return VKP_ERR_BADARGS;
+    if (!p || !blobs) return VKZG_ERR_BADARGS;
     std::lock_guard<std::mutex> lock(p->mutex);
-    const vkp_result rc = computeBatch(p, proofs, blobs, batch, /*profile=*/true);
+    const vkzg_result rc = computeBatch(p, proofs, blobs, batch, /*profile=*/true);
     out = p->lastStage;
     return rc;
 }
 
-} // namespace vkp
+} // namespace vkzg

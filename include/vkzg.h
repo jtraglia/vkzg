@@ -1,5 +1,5 @@
 /*
- * vulkan-prover -- EIP-7594 cell KZG proof generation on the GPU via Vulkan.
+ * vkzg -- EIP-7594 cell KZG proof generation on the GPU via Vulkan.
  *
  * The whole pipeline runs on the GPU: one command buffer per call, with the
  * host doing nothing but copying blobs in and proofs out.  That is
@@ -8,15 +8,15 @@
  *
  * The API is intentionally plain C so that Rust, Go, Java (JNI/Panama) and
  * others can bind to it without a C++ shim.  All functions are thread safe
- * unless stated otherwise; a single `vkp_prover` may be shared between
+ * unless stated otherwise; a single `vkzg_prover` may be shared between
  * threads, and concurrent calls are serialised internally per GPU queue.
  *
  * This library only *produces* cell proofs -- not the cells themselves
  * (computing cells from a blob is cheap on a CPU and out of scope here) and
  * not verification.
  */
-#ifndef VULKAN_PROVER_H
-#define VULKAN_PROVER_H
+#ifndef VKZG_H
+#define VKZG_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -27,29 +27,29 @@ extern "C" {
 
 /* ------------------------------------------------------------------ sizes */
 
-#define VKP_FIELD_ELEMENTS_PER_BLOB 4096
-#define VKP_NUM_CELL_PROOFS 128
-#define VKP_BYTES_PER_FIELD_ELEMENT 32
-#define VKP_BYTES_PER_BLOB (VKP_FIELD_ELEMENTS_PER_BLOB * VKP_BYTES_PER_FIELD_ELEMENT)
-#define VKP_BYTES_PER_PROOF 48
+#define VKZG_FIELD_ELEMENTS_PER_BLOB 4096
+#define VKZG_NUM_CELL_PROOFS 128
+#define VKZG_BYTES_PER_FIELD_ELEMENT 32
+#define VKZG_BYTES_PER_BLOB (VKZG_FIELD_ELEMENTS_PER_BLOB * VKZG_BYTES_PER_FIELD_ELEMENT)
+#define VKZG_BYTES_PER_PROOF 48
 /* Number of G1 points in the monomial-form trusted setup we consume. */
-#define VKP_NUM_SETUP_G1_POINTS VKP_FIELD_ELEMENTS_PER_BLOB
-#define VKP_BYTES_PER_G1 48
+#define VKZG_NUM_SETUP_G1_POINTS VKZG_FIELD_ELEMENTS_PER_BLOB
+#define VKZG_BYTES_PER_G1 48
 
 /* ----------------------------------------------------------------- status */
 
 typedef enum {
-    VKP_OK = 0,
-    VKP_ERR_BADARGS = 1,     /* caller passed a null/invalid argument */
-    VKP_ERR_MALLOC = 2,      /* host allocation failed */
-    VKP_ERR_IO = 3,          /* trusted setup or cache file could not be read */
-    VKP_ERR_SETUP = 4,       /* trusted setup was malformed or off-curve */
-    VKP_ERR_GPU = 5,         /* no Vulkan device, or a shader failed to build */
-    VKP_ERR_INVALID_BLOB = 6 /* a field element in the blob was not canonical */
-} vkp_result;
+    VKZG_OK = 0,
+    VKZG_ERR_BADARGS = 1,     /* caller passed a null/invalid argument */
+    VKZG_ERR_MALLOC = 2,      /* host allocation failed */
+    VKZG_ERR_IO = 3,          /* trusted setup or cache file could not be read */
+    VKZG_ERR_SETUP = 4,       /* trusted setup was malformed or off-curve */
+    VKZG_ERR_GPU = 5,         /* no Vulkan device, or a shader failed to build */
+    VKZG_ERR_INVALID_BLOB = 6 /* a field element in the blob was not canonical */
+} vkzg_result;
 
 /* Human readable form of a status code. Never returns NULL. */
-const char *vkp_error_string(vkp_result r);
+const char *vkzg_error_string(vkzg_result r);
 
 /* ---------------------------------------------------------------- options */
 
@@ -77,14 +77,14 @@ typedef struct {
      * 2 MiB per blob).  0 selects a sensible default.
      */
     uint32_t max_batch_size;
-} vkp_options;
+} vkzg_options;
 
 /* Fills `opts` with the recommended defaults. */
-void vkp_options_default(vkp_options *opts);
+void vkzg_options_default(vkzg_options *opts);
 
 /* ----------------------------------------------------------------- prover */
 
-typedef struct vkp_prover vkp_prover;
+typedef struct vkzg_prover vkzg_prover;
 
 /*
  * Build a prover using the Ethereum mainnet trusted setup, which is compiled
@@ -92,34 +92,34 @@ typedef struct vkp_prover vkp_prover;
  * are fixed for the lifetime of the protocol, so there is no file to ship,
  * locate or validate at runtime.
  */
-vkp_result vkp_prover_new_default(vkp_prover **out, const vkp_options *opts);
+vkzg_result vkzg_prover_new_default(vkzg_prover **out, const vkzg_options *opts);
 
 /*
  * Build a prover from a caller-supplied monomial-form G1 trusted setup, for
  * testnets or a future ceremony.
  *
- * `g1_monomial_bytes` is VKP_NUM_SETUP_G1_POINTS compressed points
+ * `g1_monomial_bytes` is VKZG_NUM_SETUP_G1_POINTS compressed points
  * (48 bytes each), in the same order and encoding c-kzg-4844 uses.
  */
-vkp_result vkp_prover_new(vkp_prover **out, const uint8_t *g1_monomial_bytes,
-                              size_t g1_monomial_len, const vkp_options *opts);
+vkzg_result vkzg_prover_new(vkzg_prover **out, const uint8_t *g1_monomial_bytes,
+                              size_t g1_monomial_len, const vkzg_options *opts);
 
 
-void vkp_prover_free(vkp_prover *p);
+void vkzg_prover_free(vkzg_prover *p);
 
 /* Name of the Vulkan device in use, e.g. "Apple M1 (G13G B1)". Valid for the prover's lifetime. */
-const char *vkp_prover_device_name(const vkp_prover *p);
+const char *vkzg_prover_device_name(const vkzg_prover *p);
 
 /* ---------------------------------------------------------------- compute */
 
 /*
  * Compute all 128 cell proofs for one blob.
  *
- * `blob`   is VKP_BYTES_PER_BLOB bytes: 4096 big-endian canonical field
+ * `blob`   is VKZG_BYTES_PER_BLOB bytes: 4096 big-endian canonical field
  *          elements.
- * `proofs` receives VKP_NUM_CELL_PROOFS * VKP_BYTES_PER_PROOF bytes.
+ * `proofs` receives VKZG_NUM_CELL_PROOFS * VKZG_BYTES_PER_PROOF bytes.
  */
-vkp_result vkp_compute_proofs(vkp_prover *p, uint8_t *proofs, const uint8_t *blob);
+vkzg_result vkzg_compute_proofs(vkzg_prover *p, uint8_t *proofs, const uint8_t *blob);
 
 /*
  * Batched form.  `blobs` is `num_blobs` consecutive blobs; `proofs` is the
@@ -127,11 +127,11 @@ vkp_result vkp_compute_proofs(vkp_prover *p, uint8_t *proofs, const uint8_t *blo
  * and is markedly more efficient per blob than repeated single calls -- this
  * is the entry point supernodes should use.
  */
-vkp_result vkp_compute_proofs_batch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs,
+vkzg_result vkzg_compute_proofs_batch(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs,
                                         size_t num_blobs);
 
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
 
-#endif /* VULKAN_PROVER_H */
+#endif /* VKZG_H */

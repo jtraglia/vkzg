@@ -1,5 +1,5 @@
 // Latency and throughput benchmark for the GPU prover.
-#include "../include/vulkan_prover.h"
+#include "../include/vkzg.h"
 
 #include <algorithm>
 #include <chrono>
@@ -16,7 +16,7 @@ static double now_ms() {
 // Deterministic pseudo-random canonical blobs.
 static void fill_blob(uint8_t *blob, uint64_t seed) {
     uint64_t s = seed * 0x9E3779B97F4A7C15ull + 1;
-    for (int i = 0; i < VKP_FIELD_ELEMENTS_PER_BLOB; i++) {
+    for (int i = 0; i < VKZG_FIELD_ELEMENTS_PER_BLOB; i++) {
         uint8_t *fe = blob + (size_t)i * 32;
         for (int j = 0; j < 32; j++) {
             s ^= s << 13;
@@ -32,38 +32,38 @@ int main(int argc, char **argv) {
     const int reps = argc > 1 ? atoi(argv[1]) : 20;
     const uint32_t maxBatch = argc > 2 ? (uint32_t)atoi(argv[2]) : 8;
 
-    vkp_options opts;
-    vkp_options_default(&opts);
-    opts.table_cache_path = "/tmp/vkp_prover_tables_v3.cache";
+    vkzg_options opts;
+    vkzg_options_default(&opts);
+    opts.table_cache_path = "/tmp/vkzg_prover_tables_v3.cache";
     opts.max_batch_size = maxBatch;
 
-    vkp_prover *p = nullptr;
+    vkzg_prover *p = nullptr;
     double t0 = now_ms();
-    vkp_result rc = vkp_prover_new_default(&p, &opts);
-    if (rc != VKP_OK) {
-        printf("prover_new failed: %s\n", vkp_error_string(rc));
+    vkzg_result rc = vkzg_prover_new_default(&p, &opts);
+    if (rc != VKZG_OK) {
+        printf("prover_new failed: %s\n", vkzg_error_string(rc));
         return 1;
     }
-    printf("device: %s   setup: %.0f ms\n\n", vkp_prover_device_name(p), now_ms() - t0);
+    printf("device: %s   setup: %.0f ms\n\n", vkzg_prover_device_name(p), now_ms() - t0);
 
-    const size_t proofBytes = (size_t)VKP_NUM_CELL_PROOFS * VKP_BYTES_PER_PROOF;
+    const size_t proofBytes = (size_t)VKZG_NUM_CELL_PROOFS * VKZG_BYTES_PER_PROOF;
 
-    std::vector<uint8_t> blobs((size_t)maxBatch * VKP_BYTES_PER_BLOB);
+    std::vector<uint8_t> blobs((size_t)maxBatch * VKZG_BYTES_PER_BLOB);
     for (uint32_t i = 0; i < maxBatch; i++) {
-        fill_blob(&blobs[(size_t)i * VKP_BYTES_PER_BLOB], i + 1);
+        fill_blob(&blobs[(size_t)i * VKZG_BYTES_PER_BLOB], i + 1);
     }
     std::vector<uint8_t> proofs((size_t)maxBatch * proofBytes);
 
     auto run = [&](const char *label, uint32_t n) {
         // warm up
-        vkp_compute_proofs_batch(p, proofs.data(), blobs.data(), n);
+        vkzg_compute_proofs_batch(p, proofs.data(), blobs.data(), n);
         double best = 1e30, total = 0;
         for (int r = 0; r < reps; r++) {
             double a = now_ms();
-            vkp_result e = vkp_compute_proofs_batch(p, proofs.data(), blobs.data(), n);
+            vkzg_result e = vkzg_compute_proofs_batch(p, proofs.data(), blobs.data(), n);
             double ms = now_ms() - a;
-            if (e != VKP_OK) {
-                printf("  %s: error %s\n", label, vkp_error_string(e));
+            if (e != VKZG_OK) {
+                printf("  %s: error %s\n", label, vkzg_error_string(e));
                 return;
             }
             best = std::min(best, ms);
@@ -83,6 +83,6 @@ int main(int argc, char **argv) {
         run(label, n);
     }
 
-    vkp_prover_free(p);
+    vkzg_prover_free(p);
     return 0;
 }
