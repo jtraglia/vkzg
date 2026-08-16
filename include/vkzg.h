@@ -54,7 +54,7 @@ typedef struct {
     /*
      * Number of blobs the prover should be able to have in flight.  Larger
      * values raise steady-state throughput at the cost of memory (roughly
-     * 2 MiB per blob).  0 selects a sensible default.
+     * 5.6 MiB per blob).  0 selects a sensible default.
      */
     uint32_t max_batch_size;
 } vkzg_options;

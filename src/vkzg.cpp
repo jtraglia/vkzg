@@ -25,6 +25,13 @@
 
 using namespace vkzg;
 
+// include/vkzg.h's public size macros and src/layout_defs.h's internal ones
+// are independently maintained but must describe the same protocol; catch
+// any future drift between them at compile time.
+static_assert(VKZG_FIELD_ELEMENTS_PER_BLOB == kFieldElementsPerBlob, "public/internal size mismatch");
+static_assert(VKZG_BYTES_PER_BLOB == L_BYTES_PER_BLOB, "public/internal size mismatch");
+static_assert(VKZG_BYTES_PER_PROOF == kBytesPerProof, "public/internal size mismatch");
+
 namespace {
 
 double nowMs() {
@@ -953,7 +960,6 @@ vkzg_result vkzg_compute_proofs(vkzg_prover *p, uint8_t *proofs, const uint8_t *
 }
 
 // ------------------------------------------------------------------ profiling
-#include "profile.h"
 
 namespace vkzg {
 

@@ -24,6 +24,21 @@ shared uint tg_count[L_NUM_BUCKETS];
 shared uint tg_start[L_NUM_BUCKETS + 1];
 shared uint tg_hist[L_LOAD_CLASSES];
 
+// digit = byte + carry, borrowing into the next digit past the half window.
+// Every scalar is below r < 2^255, so the carry chain always terminates
+// inside 32 digits and no 33rd digit is ever needed. Called once per digit,
+// in ascending `dd` order, threading `carry` across calls.
+int recode_digit(Fr scalar, uint dd, inout int carry) {
+    const uint byte = (scalar.v[dd >> 2] >> ((dd & 3u) * 8u)) & 0xffu;
+    int v = int(byte) + carry;
+    carry = 0;
+    if (v > L_NUM_BUCKETS) {
+        v -= 2 * L_NUM_BUCKETS;
+        carry = 1;
+    }
+    return v;
+}
+
 void main() {
     U16Buf itemsBuf = U16Buf(pc.itemsAddr);
     U32Buf startsBuf = U32Buf(pc.startsAddr);
@@ -44,20 +59,11 @@ void main() {
     }
     barrier();
 
-    // digit = byte + carry, borrowing into the next digit past the half window.
-    // Every scalar is below r < 2^255, so the carry chain always terminates
-    // inside 32 digits and no 33rd digit is ever needed.
     Fr scalar = fr_load(coeffsBuf, (b * L_CIRCULANT_SIZE * L_PHASE_A_TERMS + j * L_PHASE_A_TERMS + tid) * FR_NLIMBS);
     scalar = fr_to_canonical(scalar);
     int carry = 0;
     [[unroll]] for (uint dd = 0u; dd < L_NUM_DIGITS; dd++) {
-        const uint byte = (scalar.v[dd >> 2] >> ((dd & 3u) * 8u)) & 0xffu;
-        int v = int(byte) + carry;
-        carry = 0;
-        if (v > L_NUM_BUCKETS) {
-            v -= 2 * L_NUM_BUCKETS;
-            carry = 1;
-        }
+        const int v = recode_digit(scalar, dd, carry);
         if (v != 0) {
             atomicAdd(tg_count[uint(abs(v)) - 1u], 1u);
         }
@@ -99,13 +105,7 @@ void main() {
     // Scatter into bucket order; tg_count is now a per-bucket write cursor.
     carry = 0;
     [[unroll]] for (uint dd = 0u; dd < L_NUM_DIGITS; dd++) {
-        const uint byte = (scalar.v[dd >> 2] >> ((dd & 3u) * 8u)) & 0xffu;
-        int v = int(byte) + carry;
-        carry = 0;
-        if (v > L_NUM_BUCKETS) {
-            v -= 2 * L_NUM_BUCKETS;
-            carry = 1;
-        }
+        const int v = recode_digit(scalar, dd, carry);
         if (v != 0) {
             const uint neg = v < 0 ? 1u : 0u;
             const uint slot = atomicAdd(tg_count[uint(abs(v)) - 1u], 1u);

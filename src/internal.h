@@ -15,9 +15,7 @@ namespace vkzg {
 constexpr int kFieldElementsPerBlob = L_FIELD_ELEMENTS_PER_BLOB;
 constexpr int kFieldElementsPerExtBlob = L_FIELD_ELEMENTS_PER_EXT_BLOB;
 constexpr int kFieldElementsPerCell = L_FIELD_ELEMENTS_PER_CELL; // l
-constexpr int kCellsPerBlob = L_CELLS_PER_BLOB;                  // r
 constexpr int kCirculantSize = L_CIRCULANT_SIZE; // 2r, and the number of cells
-constexpr int kBytesPerFieldElement = L_BYTES_PER_FIELD_ELEMENT;
 constexpr int kBytesPerProof = L_BYTES_PER_PROOF;
 
 // ---------------------------------------------------------------- windowing
@@ -32,13 +30,9 @@ constexpr int kPhaseATerms = L_PHASE_A_TERMS;
 constexpr int kPhaseAItems = L_PHASE_A_ITEMS;
 
 // Phase B: the fused IFFT/truncate/FFT circulant kernel has 65 non-zero taps
-// (index 0 plus every odd index). kernel_items/offsets/perm below still hold
-// this flat form -- only the CPU reference (reference.cpp) uses it now; the
-// GPU path uses the split form (kCirculantHalf / kPhaseBHalfTerms /
-// kPhaseBHalfItems) instead. See layout_defs.h for why.
-constexpr int kPhaseBTerms = L_PHASE_B_TERMS;
-constexpr int kPhaseBItems = L_PHASE_B_ITEMS;
-
+// (index 0 plus every odd index), but the GPU path only ever uses the split
+// form below (kCirculantHalf / kPhaseBHalfTerms / kPhaseBHalfItems). See
+// layout_defs.h for why.
 constexpr int kCirculantHalf = L_CIRCULANT_HALF;
 constexpr int kPhaseBHalfTerms = L_PHASE_B_HALF_TERMS;
 constexpr int kPhaseBHalfItems = L_PHASE_B_HALF_ITEMS;
@@ -56,9 +50,5 @@ constexpr int kJacobianWords = L_JACOBIAN_WORDS;
 // Total number of precomputed setup points: one per (output, base, position).
 constexpr int kPositionTablePoints = kCirculantSize * kPhaseATerms * kNumDigits; // 262144
 constexpr size_t kPositionTableWords = (size_t)kPositionTablePoints * kAffineWords;
-
-// Bump when the on-disk cache layout changes.
-constexpr uint32_t kTableCacheVersion = 6;
-constexpr uint32_t kTableCacheMagic = 0x475A4B50; // "PKZG"
 
 } // namespace vkzg

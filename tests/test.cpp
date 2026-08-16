@@ -74,10 +74,12 @@ int main(int argc, char **argv) {
         const bool proofs_ok = memcmp(proofs.data(), v.proofs.data(), proofBytes) == 0;
         if (!proofs_ok) {
             printf("FAIL %s: proofs MISMATCH\n", v.name.c_str());
-            for (int i = 0; i < 128; i++) {
-                if (memcmp(&proofs[i * 48], &v.proofs[i * 48], 48) != 0) {
+            for (int i = 0; i < VKZG_NUM_CELL_PROOFS; i++) {
+                const size_t off = (size_t)i * VKZG_BYTES_PER_PROOF;
+                if (memcmp(&proofs[off], &v.proofs[off], VKZG_BYTES_PER_PROOF) != 0) {
                     printf("   first bad proof %d\n     got  %s\n     want %s\n", i,
-                           hex(&proofs[i * 48], 48).c_str(), hex(&v.proofs[i * 48], 48).c_str());
+                           hex(&proofs[off], VKZG_BYTES_PER_PROOF).c_str(),
+                           hex(&v.proofs[off], VKZG_BYTES_PER_PROOF).c_str());
                     break;
                 }
             }
@@ -150,7 +152,7 @@ int main(int argc, char **argv) {
         }
 
         // A batch larger than max_batch_size must chunk transparently.
-        const size_t big = 9; // max_batch_size is 4 above
+        const size_t big = opts.max_batch_size * 2 + 1;
         std::vector<uint8_t> blobs(big * VKZG_BYTES_PER_BLOB), bp(big * proofBytes);
         for (size_t i = 0; i < big; i++) {
             memcpy(&blobs[i * VKZG_BYTES_PER_BLOB], v->blob.data(), VKZG_BYTES_PER_BLOB);

@@ -3,6 +3,7 @@
 #pragma once
 
 #include "../include/vkzg.h"
+#include "internal.h"
 
 #include <cstdint>
 #include <vector>
@@ -15,7 +16,7 @@ struct PrecomputedTables {
     std::vector<uint32_t> kernel_items_plus, kernel_items_minus;
     std::vector<uint32_t> kernel_offsets_plus, kernel_offsets_minus;
     std::vector<uint32_t> kernel_perm_plus, kernel_perm_minus;
-    uint32_t inv_blob[8];
+    uint32_t inv_blob[kFrLimbs];
 };
 
 vkzg_result load_precomputed_tables(PrecomputedTables &out);

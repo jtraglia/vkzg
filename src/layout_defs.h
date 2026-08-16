@@ -11,14 +11,11 @@
 #define L_FIELD_ELEMENTS_PER_BLOB 4096
 #define L_FIELD_ELEMENTS_PER_EXT_BLOB 8192
 #define L_FIELD_ELEMENTS_PER_CELL 64
-#define L_CELLS_PER_BLOB 64
 #define L_CIRCULANT_SIZE 128
-#define L_BYTES_PER_FIELD_ELEMENT 32
 #define L_BYTES_PER_BLOB 131072
 #define L_BYTES_PER_PROOF 48
 
 #define L_LOG_BLOB 12
-#define L_LOG_EXT_BLOB 13
 #define L_LOG_CIRCULANT 7
 
 /* Signed-digit MSM window. */
@@ -28,8 +25,6 @@
 
 #define L_PHASE_A_TERMS 64
 #define L_PHASE_A_ITEMS 2048 /* L_PHASE_A_TERMS * L_NUM_DIGITS */
-#define L_PHASE_B_TERMS 65
-#define L_PHASE_B_ITEMS 2080 /* L_PHASE_B_TERMS * L_NUM_DIGITS */
 #define L_LADDER_POSITIONS 32
 
 /*
@@ -37,7 +32,10 @@
  * circulant convolution into a 64-point cyclic half and a 64-point
  * negacyclic half (sign flips when a tap wraps past the output index --
  * a runtime check, not a table). Halves the tap*output cost (8320 -> 4224).
- * Verified against the flat form in tests/test_reference.cpp.
+ * Verified against the flat form during development; the CPU reference
+ * used for that check has since been removed, so this is now verified only
+ * indirectly, by the split form's proofs matching the consensus-spec
+ * vectors (tests/test.cpp).
  *
  * Both halves run as one dispatch (k_phase_b_split.comp, branching per
  * workgroup) sharing one k_bucket_reduce.comp call: splitting into two

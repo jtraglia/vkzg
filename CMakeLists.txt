@@ -15,11 +15,6 @@ find_package(Python3 COMPONENTS Interpreter)
 find_package(Vulkan REQUIRED)
 include(GNUInstallDirs)
 
-find_program(GLSLANG_VALIDATOR NAMES glslangValidator)
-if(NOT GLSLANG_VALIDATOR)
-    message(FATAL_ERROR "glslangValidator not found; install glslang (e.g. `dnf install glslang`)")
-endif()
-
 # ---------------------------------------------------------------- generated
 # Both generators are deterministic and their outputs are committed, so a
 # checkout without Python still builds; regeneration is just kept honest here.
@@ -44,6 +39,11 @@ set(SHADER_COMMON
     ${SHADER_DIR}/field.glsl.inc)
 
 if(VKZG_REGENERATE AND Python3_Interpreter_FOUND)
+    find_program(GLSLANG_VALIDATOR NAMES glslangValidator)
+    if(NOT GLSLANG_VALIDATOR)
+        message(FATAL_ERROR "glslangValidator not found; install glslang (e.g. `dnf install glslang`)")
+    endif()
+
     add_custom_command(
         OUTPUT ${GEN_DEV_CONSTANTS}
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_constants.py
@@ -54,7 +54,7 @@ if(VKZG_REGENERATE AND Python3_Interpreter_FOUND)
         OUTPUT ${GEN_SHADER_SOURCE}
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_shaders.py
                 ${GEN_SHADER_SOURCE} ${GLSLANG_VALIDATOR}
-                "${CMAKE_CURRENT_SOURCE_DIR}/src:${SHADER_DIR}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src"
                 ${KERNEL_SOURCES}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_shaders.py ${SHADER_COMMON} ${KERNEL_SOURCES}
         COMMENT "Compiling and embedding SPIR-V kernels")
