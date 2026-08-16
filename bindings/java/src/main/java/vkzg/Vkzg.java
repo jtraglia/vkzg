@@ -1,5 +1,8 @@
 package vkzg;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
@@ -7,6 +10,9 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 
 /**
  * Java bindings for vkzg (EIP-7594 cell KZG proof generation on the GPU),
@@ -17,9 +23,9 @@ import java.lang.invoke.MethodHandle;
  * batch of blobs in one call, since batching for GPU throughput is the
  * whole point.
  *
- * Needs a shared library: build the C library with -DBUILD_SHARED_LIBS=ON
- * and either put it on java.library.path or point -Dvkzg.library.path at
- * the .so file directly.
+ * The native library is bundled in the jar and loaded automatically; no
+ * separate build step is needed. Only Apple Silicon under Linux (Vulkan
+ * via the Mesa Honeykrisp driver) is supported.
  */
 public final class Vkzg {
     private Vkzg() {}
@@ -47,10 +53,17 @@ public final class Vkzg {
         if (explicit != null) {
             return SymbolLookup.libraryLookup(explicit, Arena.global());
         }
-        // System.loadLibrary honors java.library.path (unlike
-        // SymbolLookup.libraryLookup, which only sees LD_LIBRARY_PATH /
-        // absolute paths); loaderLookup then finds symbols in it.
-        System.loadLibrary("vkzg");
+        try (InputStream in = Vkzg.class.getResourceAsStream("/native/libvkzg.so")) {
+            if (in == null) {
+                throw new UnsatisfiedLinkError("bundled native/libvkzg.so resource not found in jar");
+            }
+            Path tmp = Files.createTempFile("libvkzg", ".so");
+            tmp.toFile().deleteOnExit();
+            Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
+            System.load(tmp.toAbsolutePath().toString());
+        } catch (IOException e) {
+            throw new UncheckedIOException("failed to extract bundled libvkzg.so", e);
+        }
         return SymbolLookup.loaderLookup();
     }
 

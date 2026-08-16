@@ -2,6 +2,7 @@ build/
 *.o
 *.a
 *.so
+!bindings/java/src/main/resources/native/libvkzg.so
 compile_commands.json
 *.cache
 bindings/java/target/

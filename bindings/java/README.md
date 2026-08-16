@@ -22,13 +22,6 @@ repositories { maven { url 'https://jitpack.io' } }
 dependencies { implementation 'com.github.jtraglia:vkzg:v0.1.6' }
 ```
 
-The native library isn't published with the jar; build it separately and
-point the JVM at it:
-
-```sh
-cmake -B build -DBUILD_SHARED_LIBS=ON && cmake --build build -j
-```
-
 ## Example
 
 ```java
@@ -40,5 +33,5 @@ Vkzg.deinit();
 ```
 
 ```sh
-java --enable-native-access=ALL-UNNAMED -Djava.library.path=build -cp vkzg.jar YourProgram
+java --enable-native-access=ALL-UNNAMED -cp vkzg.jar YourProgram
 ```
