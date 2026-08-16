@@ -52,7 +52,7 @@ int main() {
     }
     std::vector<uint8_t> proofs((size_t)maxBatch * proofBytes);
 
-    auto run = [&](const char *label, uint32_t n) {
+    auto run = [&](uint32_t n) {
         // warm up
         vkzg_compute_proofs(p, proofs.data(), blobs.data(), n);
         double best = 1e30, total = 0;
@@ -61,20 +61,18 @@ int main() {
             vkzg_result e = vkzg_compute_proofs(p, proofs.data(), blobs.data(), n);
             double ms = now_ms() - a;
             if (e != VKZG_OK) {
-                printf("  %s: error %s\n", label, vkzg_error_string(e));
+                printf("  blobs: %3u   error: %s\n", n, vkzg_error_string(e));
                 return;
             }
             best = std::min(best, ms);
             total += ms;
         }
-        printf("  %-9s best %9.2f ms   avg %9.2f ms   per blob %9.2f ms\n", label, best,
+        printf("  blobs: %3u   best: %9.2f ms   avg: %9.2f ms   per blob: %9.2f ms\n", n, best,
                total / reps, best / n);
     };
 
     for (uint32_t n = 1; n <= maxBatch; n *= 2) {
-        char label[64];
-        snprintf(label, sizeof(label), "%u blob%s", n, n == 1 ? "" : "s");
-        run(label, n);
+        run(n);
     }
 
     vkzg_prover_free(p);
