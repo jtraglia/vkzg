@@ -22,7 +22,10 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.13.0</version>
+                <!-- 3.8.1: modern enough to understand <release> (needs
+                     3.6+), old enough to run on build environments with an
+                     old bundled Maven (3.13.0 requires Maven 3.6.3+). -->
+                <version>3.8.1</version>
             </plugin>
         </plugins>
     </build>
