@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -28,9 +27,9 @@ static void fill_blob(uint8_t *blob, uint64_t seed) {
     }
 }
 
-int main(int argc, char **argv) {
-    const int reps = argc > 1 ? atoi(argv[1]) : 20;
-    const uint32_t maxBatch = argc > 2 ? (uint32_t)atoi(argv[2]) : 8;
+int main() {
+    const int reps = 10;
+    const uint32_t maxBatch = 256;
 
     vkzg_options opts;
     vkzg_options_default(&opts);
@@ -43,7 +42,8 @@ int main(int argc, char **argv) {
         printf("prover_new failed: %s\n", vkzg_error_string(rc));
         return 1;
     }
-    printf("device: %s   setup: %.0f ms\n\n", vkzg_prover_device_name(p), now_ms() - t0);
+    printf("device: %s (%u GPU cores)   setup: %.0f ms\n\n", vkzg_prover_device_name(p),
+           vkzg_prover_gpu_core_count(p), now_ms() - t0);
 
     const size_t proofBytes = (size_t)VKZG_NUM_CELL_PROOFS * VKZG_BYTES_PER_PROOF;
 

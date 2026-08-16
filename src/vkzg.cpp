@@ -165,6 +165,10 @@ const char *vkzg_prover_device_name(const vkzg_prover *p) {
     return p ? p->deviceName.c_str() : "";
 }
 
+uint32_t vkzg_prover_gpu_core_count(const vkzg_prover *p) {
+    return p ? p->gpuTotalCores : 0;
+}
+
 // ---------------------------------------------------------------- buffers
 
 namespace {

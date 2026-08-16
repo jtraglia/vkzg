@@ -65,8 +65,8 @@ endif()
 # The mainnet FK20/position tables are precomputed once (see the "how this
 # was generated" note in src/precomputed_tables.cpp) and shipped as a binary
 # blob rather than derived from the trusted setup at runtime. It's tried at a
-# build-tree path first (so tests/bench/example work with no install step)
-# and falls back to the installed path.
+# build-tree path first (so tests/bench work with no install step) and falls
+# back to the installed path.
 set(TABLES_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/precomputed_tables.bin)
 set(TABLES_BUILD_PATH ${CMAKE_CURRENT_BINARY_DIR}/precomputed_tables.bin)
 set(TABLES_INSTALL_PATH ${CMAKE_INSTALL_FULL_DATADIR}/vkzg/precomputed_tables.bin)
@@ -108,11 +108,14 @@ if(VKZG_BUILD_TESTS)
     add_library(vkzg_vectors STATIC tests/vectors.cpp)
     target_include_directories(vkzg_vectors PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-    add_executable(test_gpu tests/test_gpu.cpp)
-    target_link_libraries(test_gpu PRIVATE vkzg vkzg_vectors)
+    # "test" is a reserved target name once CTest is enabled, so the CMake
+    # target is vkzg_test; the built binary is still named `test`.
+    add_executable(vkzg_test tests/test.cpp)
+    target_link_libraries(vkzg_test PRIVATE vkzg vkzg_vectors)
+    set_target_properties(vkzg_test PROPERTIES OUTPUT_NAME test)
 
     set(VEC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/tests/vectors)
-    add_test(NAME gpu COMMAND test_gpu ${VEC_DIR})
+    add_test(NAME test COMMAND vkzg_test ${VEC_DIR})
 endif()
 
 # --------------------------------------------------------------- benchmarks
@@ -120,12 +123,9 @@ if(VKZG_BUILD_BENCHMARKS)
     add_executable(bench bench/bench.cpp)
     target_link_libraries(bench PRIVATE vkzg)
 
-    add_executable(profile_stages bench/profile_stages.cpp)
-    target_link_libraries(profile_stages PRIVATE vkzg)
+    add_executable(profile bench/profile.cpp)
+    target_link_libraries(profile PRIVATE vkzg)
 endif()
-
-add_executable(example examples/example.c)
-target_link_libraries(example PRIVATE vkzg)
 
 # ------------------------------------------------------------------ install
 install(TARGETS vkzg

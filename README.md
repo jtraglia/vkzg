@@ -14,7 +14,6 @@ Vulkan driver) but targets any Vulkan 1.2 device.
 ```sh
 cmake -B build && cmake --build build -j
 ctest --test-dir build --output-on-failure
-./build/example
 ```
 
 Needs a Vulkan 1.2+ loader and `glslangValidator` (e.g. on Fedora:

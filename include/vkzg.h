@@ -78,6 +78,9 @@ void vkzg_prover_free(vkzg_prover *p);
 /* Name of the Vulkan device in use, e.g. "Apple M1 (G13G B1)". Valid for the prover's lifetime. */
 const char *vkzg_prover_device_name(const vkzg_prover *p);
 
+/* GPU core count, or 0 if it can't be determined on this driver. */
+uint32_t vkzg_prover_gpu_core_count(const vkzg_prover *p);
+
 /* ---------------------------------------------------------------- compute */
 
 /*
