@@ -1,0 +1,36 @@
+// Reconstructs the 128 circulant outputs from phase B's split halves:
+// out[a] = C+[a] + C-[a], out[a+64] = C+[a] - C-[a] for a in [0,64) -- the
+// other side of the CRT split k_fold_ladder.comp set up. See layout_defs.h.
+//
+// C+/C- come from k_bucket_reduce.comp run with count = L_CIRCULANT_HALF,
+// which (like every other reduce call) always writes with a per-blob stride
+// of L_CIRCULANT_SIZE regardless of count -- outputs [0, L_CIRCULANT_HALF)
+// of each blob's region are the valid ones, the rest of that region is
+// untouched. Read with that same stride here, not L_CIRCULANT_HALF.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = L_CIRCULANT_HALF, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t outAddr;
+    uint64_t cPlusAddr;
+    uint64_t cMinusAddr;
+} pc;
+
+void main() {
+    U32Buf outBuf = U32Buf(pc.outAddr);
+    U32Buf cPlusBuf = U32Buf(pc.cPlusAddr);
+    U32Buf cMinusBuf = U32Buf(pc.cMinusAddr);
+
+    const uint a = gl_LocalInvocationID.x; // 0..63
+    const uint b = gl_WorkGroupID.y;
+
+    const G1 cp = g1_load(cPlusBuf, (b * L_CIRCULANT_SIZE + a) * L_JACOBIAN_WORDS);
+    const G1 cm = g1_load(cMinusBuf, (b * L_CIRCULANT_SIZE + a) * L_JACOBIAN_WORDS);
+
+    g1_store(outBuf, (b * L_CIRCULANT_SIZE + a) * L_JACOBIAN_WORDS, g1_add(cp, cm));
+    g1_store(outBuf, (b * L_CIRCULANT_SIZE + a + L_CIRCULANT_HALF) * L_JACOBIAN_WORDS,
+             g1_sub(cp, cm));
+}

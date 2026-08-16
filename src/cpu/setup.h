@@ -27,12 +27,26 @@ struct SetupTables {
     // Each item packs (tap index e, ladder position d, sign); the taps are
     // shared by all 128 outputs, which only differ by a rotation of the point
     // index, so this is built once here rather than per dispatch.
+    //
+    // Kept only for the CPU reference (reference.cpp) and the equivalence
+    // test that checks the split form below against it; the GPU path uses
+    // the split tables instead (see layout_defs.h).
     std::vector<uint32_t> kernel_items;   // kPhaseBItems entries
     std::vector<uint32_t> kernel_offsets; // kNumBuckets + 1 entries
     // Lane -> bucket, ordered by descending item count.  A SIMD group runs
     // until its slowest lane finishes, so handing the heavy buckets to one
     // group instead of spreading them across all four is worth ~1.3x.
     std::vector<uint32_t> kernel_perm; // kNumBuckets entries
+
+    // Phase B, split form (X^128-1 = (X^64-1)(X^64+1)): same shape as the
+    // flat tables above, but each covers only kCirculantHalf = 64 outputs.
+    // "plus" is the ordinary cyclic half; "minus" is the negacyclic half,
+    // whose extra wrap-around sign flip is computed at dispatch time from
+    // (tap offset e > output index a), not stored here. This is what the GPU
+    // path actually uses.
+    std::vector<uint32_t> kernel_items_plus, kernel_items_minus;
+    std::vector<uint32_t> kernel_offsets_plus, kernel_offsets_minus; // kNumBuckets + 1 entries
+    std::vector<uint32_t> kernel_perm_plus, kernel_perm_minus;       // kNumBuckets entries
 
     // 1/4096 in Montgomery form, the scale factor for the inverse transform.
     uint32_t inv_blob[kFrLimbs];

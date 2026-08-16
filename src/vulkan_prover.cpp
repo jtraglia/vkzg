@@ -91,19 +91,23 @@ struct vkp_prover {
     VkPipeline psoBuildCirculant = VK_NULL_HANDLE;
     VkPipeline psoPhaseASort = VK_NULL_HANDLE;
     VkPipeline psoPhaseA = VK_NULL_HANDLE;
-    VkPipeline psoPhaseB = VK_NULL_HANDLE;
     VkPipeline psoLadder = VK_NULL_HANDLE;
+    VkPipeline psoFoldLadder = VK_NULL_HANDLE;
+    VkPipeline psoPhaseBSplit = VK_NULL_HANDLE;
+    VkPipeline psoCombineSplit = VK_NULL_HANDLE;
     VkPipeline psoNormalize = VK_NULL_HANDLE;
     VkPipeline psoCompress = VK_NULL_HANDLE;
     VkPipeline psoReduce = VK_NULL_HANDLE;
 
     // Setup-derived, immutable.
-    VkBuf bufTable, bufRootsFwd, bufRootsInv, bufKernelItems, bufKernelOffsets, bufKernelPerm;
+    VkBuf bufTable, bufRootsFwd, bufRootsInv;
+    VkBuf bufKernelItemsPlus, bufKernelOffsetsPlus, bufKernelPermPlus;
+    VkBuf bufKernelItemsMinus, bufKernelOffsetsMinus, bufKernelPermMinus;
 
     // Per-batch working set.
     VkBuf bufBlob, bufLagrange, bufWorkA, bufPolyExt, bufCoeffs, bufBuckets,
-        bufItems, bufStarts, bufPerm, bufPoints, bufProofs, bufLadderJac, bufLadderAff,
-        bufProofsAff, bufProofBytes, bufNormScratch, bufErr;
+        bufItems, bufStarts, bufPerm, bufPoints, bufProofs, bufLadderJac, bufLadderJacFolded,
+        bufLadderAff, bufProofsAff, bufProofBytes, bufNormScratch, bufErr;
 
     uint32_t maxBatch = 0;
     std::string deviceName;
@@ -220,6 +224,9 @@ bool allocateWorkingSet(vkp_prover *p, uint32_t batch) {
     ok &= createBuffer(p->device, p->physDev,
                        B * kCirculantSize * kLadderPositions * kJacobianWords * 4, p->bufLadderJac);
     ok &= createBuffer(p->device, p->physDev,
+                       B * kCirculantSize * kLadderPositions * kJacobianWords * 4,
+                       p->bufLadderJacFolded);
+    ok &= createBuffer(p->device, p->physDev,
                        B * kCirculantSize * kLadderPositions * kAffineWords * 4, p->bufLadderAff);
     ok &= createBuffer(p->device, p->physDev, B * kCirculantSize * kAffineWords * 4, p->bufProofsAff);
     ok &= createBuffer(p->device, p->physDev, B * kCirculantSize * VKP_BYTES_PER_PROOF, p->bufProofBytes);
@@ -247,6 +254,7 @@ void freeWorkingSet(vkp_prover *p) {
     destroyBuffer(p->device, p->bufPoints);
     destroyBuffer(p->device, p->bufProofs);
     destroyBuffer(p->device, p->bufLadderJac);
+    destroyBuffer(p->device, p->bufLadderJacFolded);
     destroyBuffer(p->device, p->bufLadderAff);
     destroyBuffer(p->device, p->bufProofsAff);
     destroyBuffer(p->device, p->bufProofBytes);
@@ -263,11 +271,15 @@ vkp_prover::~vkp_prover() {
     destroyBuffer(device, bufTable);
     destroyBuffer(device, bufRootsFwd);
     destroyBuffer(device, bufRootsInv);
-    destroyBuffer(device, bufKernelItems);
-    destroyBuffer(device, bufKernelOffsets);
-    destroyBuffer(device, bufKernelPerm);
-    for (VkPipeline pso : {psoBlobToFr, psoNtt, psoBuildCirculant, psoPhaseASort,
-                           psoPhaseA, psoPhaseB, psoLadder, psoNormalize, psoCompress, psoReduce}) {
+    destroyBuffer(device, bufKernelItemsPlus);
+    destroyBuffer(device, bufKernelOffsetsPlus);
+    destroyBuffer(device, bufKernelPermPlus);
+    destroyBuffer(device, bufKernelItemsMinus);
+    destroyBuffer(device, bufKernelOffsetsMinus);
+    destroyBuffer(device, bufKernelPermMinus);
+    for (VkPipeline pso : {psoBlobToFr, psoNtt, psoBuildCirculant, psoPhaseASort, psoPhaseA,
+                           psoLadder, psoFoldLadder, psoPhaseBSplit, psoCombineSplit, psoNormalize,
+                           psoCompress, psoReduce}) {
         if (pso) vkDestroyPipeline(device, pso, nullptr);
     }
     if (pipelineLayout) vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
@@ -367,8 +379,10 @@ vkp_result buildPipelines(vkp_prover *p) {
         {"k_build_circulant", &p->psoBuildCirculant},
         {"k_phase_a_sort", &p->psoPhaseASort},
         {"k_phase_a", &p->psoPhaseA},
-        {"k_phase_b", &p->psoPhaseB},
         {"k_ladder", &p->psoLadder},
+        {"k_fold_ladder", &p->psoFoldLadder},
+        {"k_phase_b_split", &p->psoPhaseBSplit},
+        {"k_combine_split", &p->psoCombineSplit},
         {"k_normalize", &p->psoNormalize},
         {"k_compress_proofs", &p->psoCompress},
         {"k_bucket_reduce", &p->psoReduce},
@@ -505,12 +519,18 @@ vkp_result createProver(vkp_prover **out, SetupTables &tables, const vkp_options
                            p->bufRootsFwd);
     ok &= createBufferFrom(p->device, p->physDev, tables.roots_inv.data(), tables.roots_inv.size() * 4,
                            p->bufRootsInv);
-    ok &= createBufferFrom(p->device, p->physDev, tables.kernel_items.data(),
-                           tables.kernel_items.size() * 4, p->bufKernelItems);
-    ok &= createBufferFrom(p->device, p->physDev, tables.kernel_offsets.data(),
-                           tables.kernel_offsets.size() * 4, p->bufKernelOffsets);
-    ok &= createBufferFrom(p->device, p->physDev, tables.kernel_perm.data(),
-                           tables.kernel_perm.size() * 4, p->bufKernelPerm);
+    ok &= createBufferFrom(p->device, p->physDev, tables.kernel_items_plus.data(),
+                           tables.kernel_items_plus.size() * 4, p->bufKernelItemsPlus);
+    ok &= createBufferFrom(p->device, p->physDev, tables.kernel_offsets_plus.data(),
+                           tables.kernel_offsets_plus.size() * 4, p->bufKernelOffsetsPlus);
+    ok &= createBufferFrom(p->device, p->physDev, tables.kernel_perm_plus.data(),
+                           tables.kernel_perm_plus.size() * 4, p->bufKernelPermPlus);
+    ok &= createBufferFrom(p->device, p->physDev, tables.kernel_items_minus.data(),
+                           tables.kernel_items_minus.size() * 4, p->bufKernelItemsMinus);
+    ok &= createBufferFrom(p->device, p->physDev, tables.kernel_offsets_minus.data(),
+                           tables.kernel_offsets_minus.size() * 4, p->bufKernelOffsetsMinus);
+    ok &= createBufferFrom(p->device, p->physDev, tables.kernel_perm_minus.data(),
+                           tables.kernel_perm_minus.size() * 4, p->bufKernelPermMinus);
     if (!ok) {
         delete p;
         return VKP_ERR_MALLOC;
@@ -774,22 +794,60 @@ vkp_result computeBatch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs, ui
     }
     flush(&st.ladder);
 
+    // 6. phase B, split form (X^128-1 = (X^64-1)(X^64+1); see layout_defs.h):
+    // fold the ladder into its "plus"/"minus" halves, normalize once (same
+    // total point count as the flat form), run the split bucket-MSM over
+    // each half in turn (bufBuckets and bufPoints/bufLadderJac are reused as
+    // scratch since nothing else needs their prior contents by this point),
+    // then recombine into the same 128-point bufProofs the rest of the
+    // pipeline already expects.
+    {
+        struct { uint64_t outAddr, ladderAddr; } pc{p->bufLadderJacFolded.addr, p->bufLadderJac.addr};
+        const uint32_t groups = (kCirculantHalf * kLadderPositions) / 128;
+        dispatch(cmd, p->psoFoldLadder, p->pipelineLayout, pc, groups, batch);
+    }
+    flush(&st.fold_ladder);
+
     const uint32_t ladderPoints = (uint32_t)batch * kCirculantSize * kLadderPositions;
-    recordNormalize(cmd, p, p->bufLadderAff, p->bufLadderJac, ladderPoints,
+    recordNormalize(cmd, p, p->bufLadderAff, p->bufLadderJacFolded, ladderPoints,
                     inversionChunk(ladderPoints, 32, 128, 8192));
     flush(&st.normalize_ladder);
 
-    // 6. phase B: the fused circulant map
-    {
-        struct { uint64_t outAddr, ladderAddr, itemsAddr, offsetsAddr, permAddr; } pc{
-            p->bufBuckets.addr, p->bufLadderAff.addr, p->bufKernelItems.addr,
-            p->bufKernelOffsets.addr, p->bufKernelPerm.addr};
-        dispatch(cmd, p->psoPhaseB, p->pipelineLayout, pc, kCirculantSize, batch);
-    }
-    flush(&st.phase_b);
+    const uint32_t halfLadderOffset = kCirculantHalf * kLadderPositions * kAffineWords;
 
-    recordReduce(cmd, p, p->bufProofs, kCirculantSize, batch);
-    flush(&st.reduce_b);
+    // 6a. "plus" half: ordinary cyclic sub-convolution.
+    {
+        struct {
+            uint64_t outAddr, ladderAddr, itemsAddr, offsetsAddr, permAddr;
+            uint32_t halfOffset, negacyclic;
+        } pc{p->bufBuckets.addr,       p->bufLadderAff.addr,        p->bufKernelItemsPlus.addr,
+             p->bufKernelOffsetsPlus.addr, p->bufKernelPermPlus.addr, 0u, 0u};
+        dispatch(cmd, p->psoPhaseBSplit, p->pipelineLayout, pc, kCirculantHalf, batch);
+    }
+    flush(&st.phase_b_plus);
+    recordReduce(cmd, p, p->bufPoints, kCirculantHalf, batch);
+    flush(&st.reduce_b_plus);
+
+    // 6b. "minus" half: negacyclic sub-convolution (extra sign flip on wrap).
+    {
+        struct {
+            uint64_t outAddr, ladderAddr, itemsAddr, offsetsAddr, permAddr;
+            uint32_t halfOffset, negacyclic;
+        } pc{p->bufBuckets.addr,        p->bufLadderAff.addr,         p->bufKernelItemsMinus.addr,
+             p->bufKernelOffsetsMinus.addr, p->bufKernelPermMinus.addr, halfLadderOffset, 1u};
+        dispatch(cmd, p->psoPhaseBSplit, p->pipelineLayout, pc, kCirculantHalf, batch);
+    }
+    flush(&st.phase_b_minus);
+    recordReduce(cmd, p, p->bufLadderJac, kCirculantHalf, batch);
+    flush(&st.reduce_b_minus);
+
+    // 6c. recombine: out[a] = C+[a]+C-[a], out[a+64] = C+[a]-C-[a].
+    {
+        struct { uint64_t outAddr, cPlusAddr, cMinusAddr; } pc{p->bufProofs.addr, p->bufPoints.addr,
+                                                                p->bufLadderJac.addr};
+        dispatch(cmd, p->psoCombineSplit, p->pipelineLayout, pc, 1, batch);
+    }
+    flush(&st.combine);
 
     // 7. proofs -> affine -> compressed bytes
     const uint32_t proofPoints = (uint32_t)batch * kCirculantSize;

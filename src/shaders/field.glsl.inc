@@ -385,6 +385,15 @@ G1 g1_madd(G1 a, G1A b) {
     return r;
 }
 
+// Negation only flips Y in Jacobian coordinates.
+G1 g1_neg(G1 p) {
+    G1 r = p;
+    r.y = fp_neg(p.y);
+    return r;
+}
+
+G1 g1_sub(G1 a, G1 b) { return g1_add(a, g1_neg(b)); }
+
 // ------------------------------------------------------------ memory access
 //
 // Buffers are buffer_reference pointers; `off` is a 32-bit element index

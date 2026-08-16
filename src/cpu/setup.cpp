@@ -260,19 +260,26 @@ vkp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool
     });
 
     // --------------------------------------------------- phase B kernel items
-    {
-        Fr kappa[kCirculantSize];
-        compute_circulant_kernel(kappa);
-
+    //
+    // Builds a bucket-sorted signed-digit item list for a circulant kernel of
+    // `size` taps, shared by every output of that sub-problem (only a
+    // rotation of the point index differs per output -- see k_phase_b.comp /
+    // k_phase_b_split.comp). Used for the flat 128-tap kernel (kept for the
+    // CPU reference) and, halved, for the split form's two 64-tap kernels
+    // that the GPU path actually uses (see layout_defs.h).
+    auto build_kernel_items = [](const Fr *kappa, int size, int expected_taps,
+                                  std::vector<uint32_t> &items_out,
+                                  std::vector<uint32_t> &offsets_out,
+                                  std::vector<uint32_t> &perm_out) -> vkp_result {
         struct Item {
             uint32_t bucket; // |digit| - 1
             uint32_t packed; // tap | position << 8 | sign << 16
         };
         std::vector<Item> items;
-        items.reserve(kPhaseBItems);
+        items.reserve((size_t)expected_taps * kNumDigits);
 
         int tap = 0;
-        for (int e = 0; e < kCirculantSize; e++) {
+        for (int e = 0; e < size; e++) {
             if (fr_is_zero(kappa[e])) continue;
             uint64_t canonical[4];
             fr_to_canonical(canonical, kappa[e]);
@@ -286,30 +293,63 @@ vkp_result build_setup_tables(const uint8_t *g1_monomial_bytes, size_t len, bool
             }
             tap++;
         }
-        if (tap != kPhaseBTerms) return VKP_ERR_SETUP;
+        if (tap != expected_taps) return VKP_ERR_SETUP;
 
         std::stable_sort(items.begin(), items.end(),
                          [](const Item &a, const Item &b) { return a.bucket < b.bucket; });
 
-        out.kernel_items.resize(items.size());
-        out.kernel_offsets.assign(kNumBuckets + 1, 0);
-        for (size_t i = 0; i < items.size(); i++) out.kernel_items[i] = items[i].packed;
-        // Prefix offsets: offsets[k] is the first item of bucket k.
+        items_out.resize(items.size());
+        offsets_out.assign(kNumBuckets + 1, 0);
+        for (size_t i = 0; i < items.size(); i++) items_out[i] = items[i].packed;
         std::vector<uint32_t> counts(kNumBuckets, 0);
         for (const auto &it : items) counts[it.bucket]++;
         uint32_t acc = 0;
         for (int k = 0; k < kNumBuckets; k++) {
-            out.kernel_offsets[k] = acc;
+            offsets_out[k] = acc;
             acc += counts[k];
         }
-        out.kernel_offsets[kNumBuckets] = acc;
+        offsets_out[kNumBuckets] = acc;
 
         std::vector<uint32_t> order(kNumBuckets);
         for (int k = 0; k < kNumBuckets; k++) order[k] = (uint32_t)k;
         std::stable_sort(order.begin(), order.end(), [&](uint32_t x, uint32_t y) {
             return counts[x] > counts[y];
         });
-        out.kernel_perm = order;
+        perm_out = order;
+        return VKP_OK;
+    };
+
+    Fr kappa[kCirculantSize];
+    compute_circulant_kernel(kappa);
+    vkp_result rc = build_kernel_items(kappa, kCirculantSize, kPhaseBTerms, out.kernel_items,
+                                          out.kernel_offsets, out.kernel_perm);
+    if (rc != VKP_OK) return rc;
+
+    // Split form: X^128-1 = (X^64-1)(X^64+1). kappa+[i] = (kappa[i] +
+    // kappa[i+64])/2, kappa-[i] = (kappa[i] - kappa[i+64])/2 for i in [0,64);
+    // the 1/2 is folded in here so the final combine step is pure addition.
+    // See the equivalence check in tests/test_reference.cpp.
+    {
+        Fr half;
+        {
+            Fr two;
+            fr_from_u64(two, 2);
+            fr_inv(half, two);
+        }
+        Fr kappa_plus[kCirculantHalf], kappa_minus[kCirculantHalf];
+        for (int i = 0; i < kCirculantHalf; i++) {
+            Fr sum, diff;
+            fr_add(sum, kappa[i], kappa[i + kCirculantHalf]);
+            fr_sub(diff, kappa[i], kappa[i + kCirculantHalf]);
+            fr_mul(kappa_plus[i], sum, half);
+            fr_mul(kappa_minus[i], diff, half);
+        }
+        rc = build_kernel_items(kappa_plus, kCirculantHalf, kPhaseBHalfTerms, out.kernel_items_plus,
+                                out.kernel_offsets_plus, out.kernel_perm_plus);
+        if (rc != VKP_OK) return rc;
+        rc = build_kernel_items(kappa_minus, kCirculantHalf, kPhaseBHalfTerms, out.kernel_items_minus,
+                                out.kernel_offsets_minus, out.kernel_perm_minus);
+        if (rc != VKP_OK) return rc;
     }
 
     return VKP_OK;
@@ -327,10 +367,24 @@ struct CacheHeader {
     uint64_t kernel_items;
     uint64_t kernel_offsets;
     uint64_t kernel_perm;
+    uint64_t kernel_items_plus;
+    uint64_t kernel_items_minus;
+    uint64_t kernel_offsets_half;  // same for plus and minus
+    uint64_t kernel_perm_half;     // same for plus and minus
 };
 
 bool read_exact(FILE *f, void *p, size_t n) { return fread(p, 1, n, f) == n; }
 bool write_exact(FILE *f, const void *p, size_t n) { return fwrite(p, 1, n, f) == n; }
+
+template <typename T>
+bool read_vec(FILE *f, std::vector<T> &v, size_t count) {
+    v.resize(count);
+    return read_exact(f, v.data(), count * sizeof(T));
+}
+template <typename T>
+bool write_vec(FILE *f, const std::vector<T> &v) {
+    return write_exact(f, v.data(), v.size() * sizeof(T));
+}
 } // namespace
 
 vkp_result load_table_cache(const std::string &path, uint64_t expected_digest, SetupTables &out) {
@@ -344,18 +398,18 @@ vkp_result load_table_cache(const std::string &path, uint64_t expected_digest, S
         goto done;
     }
     out.setup_digest = h.setup_digest;
-    out.position_table.resize(h.position_words);
-    out.roots_fwd.resize(h.roots_words);
-    out.roots_inv.resize(h.roots_words);
-    out.kernel_items.resize(h.kernel_items);
-    out.kernel_offsets.resize(h.kernel_offsets);
-    out.kernel_perm.resize(h.kernel_perm);
-    if (!read_exact(f, out.position_table.data(), h.position_words * 4) ||
-        !read_exact(f, out.roots_fwd.data(), h.roots_words * 4) ||
-        !read_exact(f, out.roots_inv.data(), h.roots_words * 4) ||
-        !read_exact(f, out.kernel_items.data(), h.kernel_items * 4) ||
-        !read_exact(f, out.kernel_offsets.data(), h.kernel_offsets * 4) ||
-        !read_exact(f, out.kernel_perm.data(), h.kernel_perm * 4) ||
+    if (!read_vec(f, out.position_table, h.position_words) ||
+        !read_vec(f, out.roots_fwd, h.roots_words) ||
+        !read_vec(f, out.roots_inv, h.roots_words) ||
+        !read_vec(f, out.kernel_items, h.kernel_items) ||
+        !read_vec(f, out.kernel_offsets, h.kernel_offsets) ||
+        !read_vec(f, out.kernel_perm, h.kernel_perm) ||
+        !read_vec(f, out.kernel_items_plus, h.kernel_items_plus) ||
+        !read_vec(f, out.kernel_items_minus, h.kernel_items_minus) ||
+        !read_vec(f, out.kernel_offsets_plus, h.kernel_offsets_half) ||
+        !read_vec(f, out.kernel_offsets_minus, h.kernel_offsets_half) ||
+        !read_vec(f, out.kernel_perm_plus, h.kernel_perm_half) ||
+        !read_vec(f, out.kernel_perm_minus, h.kernel_perm_half) ||
         !read_exact(f, out.inv_blob, sizeof(out.inv_blob))) {
         goto done;
     }
@@ -378,13 +432,17 @@ vkp_result save_table_cache(const std::string &path, const SetupTables &in) {
     h.kernel_items = in.kernel_items.size();
     h.kernel_offsets = in.kernel_offsets.size();
     h.kernel_perm = in.kernel_perm.size();
-    bool ok = write_exact(f, &h, sizeof(h)) &&
-              write_exact(f, in.position_table.data(), in.position_table.size() * 4) &&
-              write_exact(f, in.roots_fwd.data(), in.roots_fwd.size() * 4) &&
-              write_exact(f, in.roots_inv.data(), in.roots_inv.size() * 4) &&
-              write_exact(f, in.kernel_items.data(), in.kernel_items.size() * 4) &&
-              write_exact(f, in.kernel_offsets.data(), in.kernel_offsets.size() * 4) &&
-              write_exact(f, in.kernel_perm.data(), in.kernel_perm.size() * 4) &&
+    h.kernel_items_plus = in.kernel_items_plus.size();
+    h.kernel_items_minus = in.kernel_items_minus.size();
+    h.kernel_offsets_half = in.kernel_offsets_plus.size();
+    h.kernel_perm_half = in.kernel_perm_plus.size();
+    bool ok = write_exact(f, &h, sizeof(h)) && write_vec(f, in.position_table) &&
+              write_vec(f, in.roots_fwd) && write_vec(f, in.roots_inv) &&
+              write_vec(f, in.kernel_items) && write_vec(f, in.kernel_offsets) &&
+              write_vec(f, in.kernel_perm) && write_vec(f, in.kernel_items_plus) &&
+              write_vec(f, in.kernel_items_minus) && write_vec(f, in.kernel_offsets_plus) &&
+              write_vec(f, in.kernel_offsets_minus) && write_vec(f, in.kernel_perm_plus) &&
+              write_vec(f, in.kernel_perm_minus) &&
               write_exact(f, in.inv_blob, sizeof(in.inv_blob));
     fclose(f);
     if (!ok) {

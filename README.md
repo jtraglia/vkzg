@@ -36,16 +36,29 @@ Apple M1, 8 GPU cores, Fedora Asahi Remix, Mesa 26.1.6 (Honeykrisp):
 
 | | ms/blob | blobs/s |
 |---|---|---|
-| batch 1 | 120.2 | 8.3 |
-| batch 8 | 60.4 | 16.5 |
-| batch 16 | 56.4 | 17.7 |
-| batch 32 | 56.3 | 17.8 |
-| **batch 64** | **55.3** | **18.1** |
+| batch 1 | 125.4 | 8.0 |
+| batch 8 | 50.1 | 20.0 |
+| batch 16 | 47.1 | 21.2 |
+| batch 32 | 45.9 | 21.8 |
+| batch 64 | 45.1 | 22.2 |
+| **batch 128** | **44.5** | **22.5** |
+
+**This now beats the original `metal-prover`'s Metal numbers on the same
+8-core M1** (46.8 ms/blob, 21.4 blobs/s at batch 64) — not by inherently
+being faster than Metal, but because phase B no longer does the amount of
+work the Metal version's algorithm did: see
+[the split-convolution rewrite](#4-the-128-point-convolution-splits-into-two-64-point-ones)
+below. Batch 1 is the one regression (110.6 → 125.4 ms/blob unbatched, since
+the split form pays for a handful of extra small dispatches that don't pay
+for themselves until there's enough batch to amortise them) — irrelevant for
+the high-throughput batched use this library targets, but worth knowing if
+you were relying on low-batch latency specifically.
 
 An Apple M1 Ultra (64 GPU cores), same driver stack, on the same real
-hardware — not extrapolated, but measured before the tuning pass below, so
-treat it as a shape (how it scales with core count) rather than a number
-that's still current:
+hardware — not extrapolated, but measured *before* everything in
+[How it works](#how-it-works-and-why-it-looks-like-this) below, so treat it
+as a shape (how it scales with core count) rather than a number that's still
+current:
 
 | | ms/blob | blobs/s |
 |---|---|---|
@@ -55,29 +68,19 @@ that's still current:
 | batch 32 | 12.3 | 81.1 |
 | **batch 64** | **11.9** | **83.9** |
 
-8× the GPU cores buys ~5× the throughput at batch 64 (55→12 ms/blob), not
+8× the GPU cores buys ~5× the throughput at batch 64 (45→12 ms/blob), not
 8×: some stages (the ladder, the batched inversions) are latency-bound
 rather than throughput-bound, so they don't scale with core count the way
-the two MSM phases do — see [How it works](#how-it-works-and-why-it-looks-like-this).
-It also means small batches leave far more of a 64-core part idle: batch 1
-is 10× slower per blob than batch 64 on the Ultra, versus under 1.5× on the
-8-core M1 after the tuning pass below (it was closer to 2× before).
-
-**Neither number is the Metal number for the same silicon**, and they aren't
-directly comparable: the old `metal-prover` measured 46.8 ms/blob (21.4
-blobs/s) at batch 64 on the 8-core M1 through Metal. Some of the remaining
-gap is a genuine Vulkan tax (a `vkCmdPipelineBarrier` after every dispatch,
-where Metal's single-encoder hazard tracking inserted narrower barriers
-automatically); most of what looked like a much bigger gap earlier turned
-out to be a measurement bug, not a real cost — see
-[Checking the tuning](#checking-the-tuning-on-your-own-gpu).
+the two MSM phases do. It also means small batches leave far more of a
+64-core part idle: batch 1 is 10× slower per blob than batch 64 on the
+Ultra, versus under 1.5× on the 8-core M1.
 
 ### Batching
 
 Batch at least 8. Two stages need it: the doubling ladder is 128 independent
 chains per blob (128 × batch threads), and the batched inversions amortise a
 multi-millisecond field inversion across their chunk. Below batch 8 both are
-latency-bound and you pay for it — batch 1 costs over 2× batch 64's
+latency-bound and you pay for it — batch 1 costs almost 3× batch 128's
 per-blob time.
 
 Working set is **5.6 MiB per blob** plus a fixed ~28 MiB (the 24 MiB FK20
@@ -203,8 +206,11 @@ inverse NTT 4096 → monomial coefficients  GPU   (four-step, 2 dispatches)
 64 circulant columns, each NTT-128        GPU
 phase A: fixed-base bucket MSM            GPU
 doubling ladder 2^(8d)·u[j]               GPU
+fold ladder into L+/L- (see below)        GPU
 ladder → affine (batched inversion)       GPU
-phase B: the fused circulant map          GPU
+phase B+: cyclic half of the circulant    GPU
+phase B-: negacyclic half of the circulant GPU
+combine: out[a] = C+[a] ± C-[a]           GPU
 proofs → affine → compressed              GPU
 ```
 
@@ -260,6 +266,66 @@ The result is one command buffer with no host synchronisation inside it —
 just GPU-side pipeline barriers between dispatches, since Vulkan (unlike
 Metal) does not track buffer hazards automatically.
 
+### 4. The 128-point convolution splits into two 64-point ones
+
+Phase B's fused kernel (section 2 above) is a 128-point cyclic convolution
+with 65 non-zero taps. `X¹²⁸−1` factors as `(X⁶⁴−1)(X⁶⁴+1)`, and since gcd of
+those two factors is 2 (invertible mod the scalar field's prime), CRT splits
+the whole convolution into two independent 64-point ones: an ordinary cyclic
+convolution and a *negacyclic* one (`mod X⁶⁴+1`, meaning a wrap-around also
+flips sign).
+
+```
+u+[j] = u[j] + u[j+64]                     (fold, j in [0,64))
+u-[j] = u[j] - u[j+64]
+C+[a] = Σ_e κ+[e]·u+[a-e]                  (ordinary cyclic, mod X^64-1)
+C-[a] = Σ_e κ-[e]·u-[a-e]·sign(e,a)        (negacyclic, mod X^64+1)
+out[a]    = C+[a] + C-[a]                  (for a in [0,64))
+out[a+64] = C+[a] - C-[a]
+```
+
+where `κ±[i] = (κ[i] ± κ[i+64]) / 2` (the `/2` folded in so the final combine
+is pure addition) and `sign(e,a) = −1` exactly when tap `e` wraps past output
+index `a` (`e > a`), `+1` otherwise.
+
+Two things made this worth doing rather than a purely theoretical curiosity:
+
+- **The tap density barely changes, but the outputs-per-kernel halves.**
+  Each half kernel (`κ+`, `κ-`) turns out to have the *same* sparsity
+  pattern as the original — non-zero at `e=0` and every odd `e` — so 33
+  taps each (65 → 33+33), almost a wash on tap count. The saving is that
+  each half only has to cover 64 outputs instead of 128: total *tap ×
+  output* work (what the bucket-MSM actually pays for) drops from
+  `65 × 128 = 8320` to `33 × 64 × 2 = 4224`, a ~49% cut. Verified exactly —
+  with real G1 arithmetic, not just the scalar identity — in
+  `tests/test_reference.cpp` before any GPU code was touched.
+- **The negacyclic half's extra sign flip stays a shared, rotation-only
+  table.** The obvious way to handle `mod X⁶⁴+1` (twisting by a root of
+  unity into an ordinary cyclic problem) would require *scalar-multiplying*
+  every folded ladder point by a twist factor — exactly the expensive
+  per-point scalar multiplication this whole design exists to avoid. Instead,
+  the wrap sign is just `e > a`, a comparison the kernel can make at
+  dispatch time from values it already has (the tap `e` from the
+  precomputed item, the output index `a` from its own workgroup ID) — so
+  the negacyclic half keeps the exact same "one item list shared by every
+  output, only a rotation differs" structure the flat form and the cyclic
+  half both have. No per-output tables, no extra host precomputation size.
+
+The fold itself (`u±[j] = u[j] ± u[j+64]`) runs on the already-computed
+doubling ladder (`k_fold_ladder.comp`) — cheap point additions, not new
+scalar multiplications, matching the "costs only additions" framing. Both
+halves reuse the *same* bucket-MSM kernel (`k_phase_b_split.comp`), just
+with a push-constant flag selecting cyclic vs. negacyclic and which half of
+the folded ladder to read; a final tiny kernel (`k_combine_split.comp`)
+does the `C+ ± C-` reconstruction.
+
+Measured on the 8-core M1 (batch 64): phase B's total cost (both bucket-MSM
+dispatches, both reductions, the combine step) dropped from ~1716ms to
+~1042ms of a batch-64 call — about 39%, short of the ~49% theoretical cut
+because the split form pays for three extra dispatches the flat form didn't
+need (the fold, a second bucket-MSM, a second reduce). Net effect on total
+throughput: ~18% faster at batch ≥ 8 — see [Results](#results).
+
 ## Checking the tuning on your own GPU
 
 The Metal version's tuning notes above have not been fully re-validated for
@@ -287,11 +353,13 @@ honest about paying. The lesson: on a driver this young, a timestamp-based
 profiler is worth distrusting until you've checked it against a slower but
 unambiguous method at least once.
 
-With that fixed, the real breakdown at batch 64 on this M1 is phase A ~39%,
-phase B ~40%, `reduce A`/`reduce B` ~16% combined, the ladder ~3%, and
-everything else under 2% — phase A and phase B (the two bucket MSMs)
-dominating, as the Metal design expects. Two concrete things came out of
-chasing the (real) remaining gap to Metal's numbers:
+With that fixed, the real breakdown at batch 64 on this M1 was (before the
+phase B split below existed) phase A ~39%, phase B ~40%, `reduce A`/`reduce
+B` ~16% combined, the ladder ~3%, and everything else under 2% — phase A and
+phase B (the two bucket MSMs) dominating, as the Metal design expects. Two
+concrete things came out of chasing that shape (a third, much bigger one —
+splitting phase B's convolution in two — is its own section, see
+[How it works](#4-the-128-point-convolution-splits-into-two-64-point-ones)):
 
 - **The ladder's workgroups were needlessly small.** `k_ladder.comp` used a
   workgroup of 8 threads, matching the Metal original — reasonable there, but
@@ -328,7 +396,7 @@ Still open, in roughly the order worth checking next:
   Metal's automatic hazard tracking would have inferred. Narrowing these to
   only the buffers each stage actually depends on is unexplored.
 - **Other kernels' workgroup sizes** (`k_phase_a_sort.comp` at 64,
-  `k_build_circulant.comp`/`k_phase_a.comp`/`k_phase_b.comp`/
+  `k_build_circulant.comp`/`k_phase_a.comp`/`k_phase_b_split.comp`/
   `k_bucket_reduce.comp` at 128) inherited Metal's threadgroup sizes the same
   way the ladder did; only the ladder has been checked for the same
   small-workgroup effect so far, and it's the one with by far the smallest
@@ -380,12 +448,18 @@ cannot drift.
   [Checking the tuning](#checking-the-tuning-on-your-own-gpu) for what's been
   checked (the profiler itself, the ladder's workgroup size, `L_REDUCE_LANES`)
   and what's still open (`inversionChunk`, the per-dispatch barriers, other
-  kernels' workgroup sizes). The remaining gap between the 55.3 ms/blob
-  measured here and the Metal build's 46.8 ms/blob on the same silicon is the
-  most immediately actionable thing left in this repository.
-- **Phase B's tap count** can drop from 65 to ~43 by recursively splitting the
-  cyclic convolution (`X¹²⁸−1 = (X⁶⁴−1)(X⁶⁴+1)`), which costs only additions in
-  the ladder domain. Not implemented.
+  kernels' workgroup sizes, and now also the split form's own three extra
+  dispatches — see [How it works](#4-the-128-point-convolution-splits-into-two-64-point-ones)).
+  This library now runs *faster* than the original Metal build on the same
+  8-core M1, so this is no longer about closing a gap, just further headroom.
+- **Recursing the split further** (`X⁶⁴−1 = (X³²−1)(X³²+1)`, and so on) keeps
+  halving tap density in the same self-similar way; a back-of-envelope check
+  during development (plain field arithmetic, no GPU) found the *tap ×
+  output* cost keeps dropping at every level (8320 → 4224 → 2176 → 1152 →
+  ...), but each level also adds fixed per-dispatch overhead (another fold,
+  another bucket-MSM pair, another combine), so there's a real
+  diminishing-returns point past the one level implemented here. Not
+  measured where that point is on this driver.
 - **GLV** would halve the ladder's depth (248 → 120 doublings) and its memory,
   which matters most at small batch where the ladder is latency-bound. The
   host-side pieces (`glv_split`, the endomorphism) are implemented and tested;

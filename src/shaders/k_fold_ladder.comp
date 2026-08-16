@@ -1,0 +1,45 @@
+// Folds the 128-position doubling ladder into the two 64-position ladders
+// phase B's split form needs: L+[j][d] = L[j][d] + L[j+64][d], L-[j][d] =
+// L[j][d] - L[j+64][d], for j in [0,64) and every ladder position d.
+//
+// This is the "costs only additions in the ladder domain" step the split
+// (X^128-1 = (X^64-1)(X^64+1)) trades for roughly halving phase B's
+// bucket-MSM work -- see layout_defs.h. Writes into a separate buffer rather
+// than folding in place: L+[j] and L-[j] both read L[j] and L[j+64], and for
+// j < 64 the plus/minus *output* slot aliases one of those two *input*
+// slots, so in-place folding would race against itself.
+//
+// Output layout matches what k_phase_b_split.comp and the (existing)
+// k_normalize.comp expect: positions [0, 64) are L+, positions [64, 128) are
+// L-, same per-blob stride as the unfolded ladder so the buffer this writes
+// into is a drop-in normalize source (see vulkan_prover.cpp).
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t outAddr;
+    uint64_t ladderAddr;
+} pc;
+
+void main() {
+    U32Buf outBuf = U32Buf(pc.outAddr);
+    U32Buf ladderBuf = U32Buf(pc.ladderAddr);
+
+    // gl_GlobalInvocationID.x packs (j, d): j in [0,64), d in [0,32).
+    const uint jd = gl_GlobalInvocationID.x;
+    const uint j = jd / L_LADDER_POSITIONS;
+    const uint d = jd % L_LADDER_POSITIONS;
+    const uint b = gl_GlobalInvocationID.y;
+
+    const uint blobBase = b * L_CIRCULANT_SIZE * L_LADDER_POSITIONS * L_JACOBIAN_WORDS;
+    const uint lo = blobBase + (j * L_LADDER_POSITIONS + d) * L_JACOBIAN_WORDS;
+    const uint hi = blobBase + ((j + L_CIRCULANT_HALF) * L_LADDER_POSITIONS + d) * L_JACOBIAN_WORDS;
+
+    const G1 a = g1_load(ladderBuf, lo);
+    const G1 c = g1_load(ladderBuf, hi);
+    g1_store(outBuf, lo, g1_add(a, c));
+    g1_store(outBuf, hi, g1_sub(a, c));
+}

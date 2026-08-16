@@ -33,6 +33,42 @@
 #define L_PHASE_B_ITEMS 2080 /* L_PHASE_B_TERMS * L_NUM_DIGITS */
 #define L_LADDER_POSITIONS 32
 
+/*
+ * Phase B, split form: the 128-point circulant convolution factors via
+ * X^128-1 = (X^64-1)(X^64+1) into a 64-point cyclic sub-convolution ("plus")
+ * and a 64-point negacyclic sub-convolution ("minus"), each over half the
+ * ladder (folded by cheap point add/sub: L+[j] = L[j]+L[j+64], L-[j] =
+ * L[j]-L[j+64]) and each own half-size kappa. Both halves keep the same
+ * "shared item list, only the output index rotates" property the flat form
+ * has; the negacyclic half additionally flips sign when a tap's offset
+ * wraps past the output index (e > a), a cheap per-item runtime check, not
+ * a separate precomputed table. Verified equivalent to the flat form (with
+ * real G1 arithmetic) in tests/test_reference.cpp.
+ *
+ * Reconstruction folds the outputs back: out[a] = C+[a] + C-[a], out[a+64] =
+ * C+[a] - C-[a] for a in [0,64) (see k_combine_split.comp).
+ *
+ * Same math as the flat kernel (65 taps at e=0 and every odd e in [1,128)),
+ * just halved: each half kernel is nonzero at e=0 and every odd e in
+ * [1,64), 33 taps -- so the *tap density* barely changes (65 -> 33+33), but
+ * each half only has to cover 64 outputs instead of 128, which is where the
+ * saving comes from: total tap*output work (the bucket-MSM accumulation
+ * phase B actually pays for) drops from 65*128 = 8320 to 33*64*2 = 4224, a
+ * theoretical ~49% cut.
+ *
+ * Measured (batch 64, this driver): phase B's own cost (both bucket-MSM
+ * dispatches plus both reductions and the combine step) dropped from
+ * ~1716ms to ~1042ms of a batch-64 call -- a ~39% cut, not quite the
+ * theoretical ~49% since the split form pays for 3 extra dispatches
+ * (fold, a second bucket-MSM, a second reduce, a combine) that the flat
+ * form didn't need. Net effect on total throughput: ~18% at batch >= 8,
+ * enough to land this port ahead of the original Metal build's numbers on
+ * the same 8-core M1 -- see the README's Results section.
+ */
+#define L_CIRCULANT_HALF 64
+#define L_PHASE_B_HALF_TERMS 33
+#define L_PHASE_B_HALF_ITEMS 1056 /* L_PHASE_B_HALF_TERMS * L_NUM_DIGITS */
+
 /* Element sizes in uint32 words. */
 #define L_FP_WORDS 12
 #define L_FR_WORDS 8
