@@ -77,7 +77,12 @@ target_include_directories(vulkan_prover
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_options(vulkan_prover PRIVATE -Wall -Wextra -O3)
+# -Wno-missing-field-initializers: every Vulkan struct here is deliberately
+# brace-initialized with only sType set (e.g. `VkFenceCreateInfo x{TYPE};`),
+# relying on C++ value-initialization to zero the rest -- correct and the
+# idiom used throughout this codebase, but -Wextra otherwise warns on every
+# single field a large Vulkan struct doesn't explicitly list.
+target_compile_options(vulkan_prover PRIVATE -Wall -Wextra -Wno-missing-field-initializers -O3)
 target_link_libraries(vulkan_prover PUBLIC Vulkan::Vulkan)
 set_target_properties(vulkan_prover PROPERTIES
     PUBLIC_HEADER include/vulkan_prover.h
