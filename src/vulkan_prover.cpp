@@ -26,6 +26,9 @@
 #include <string>
 #include <vector>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 using namespace vkp;
 
 namespace {
@@ -35,6 +38,34 @@ double nowMs() {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
 }
+
+// Mesa's Honeykrisp driver logs "MESA: error: Opening /dev/dri/cardN failed:
+// Permission denied" straight to stderr while enumerating physical devices --
+// it's probing every DRM node on the system, including KMS/display nodes
+// this process has no use for, not something vkEnumeratePhysicalDevices
+// itself fails on (the render node this library actually ends up using is
+// world-readable and works fine either way). There's no Vulkan API to quiet
+// a driver's own stderr logging, so this redirects fd 2 to /dev/null only
+// around the specific call that triggers it and restores it immediately
+// after, so any real stderr output (this process's own, or a later Vulkan
+// call's) is unaffected.
+struct ScopedStderrSuppress {
+    int saved = -1;
+    ScopedStderrSuppress() {
+        fflush(stderr);
+        const int devnull = open("/dev/null", O_WRONLY);
+        if (devnull < 0) return;
+        saved = dup(STDERR_FILENO);
+        if (saved >= 0) dup2(devnull, STDERR_FILENO);
+        close(devnull);
+    }
+    ~ScopedStderrSuppress() {
+        if (saved < 0) return;
+        fflush(stderr);
+        dup2(saved, STDERR_FILENO);
+        close(saved);
+    }
+};
 
 uint32_t ilog2(uint32_t n) {
     uint32_t r = 0;
@@ -348,10 +379,16 @@ int deviceTypeScore(VkPhysicalDeviceType t) {
 
 VkPhysicalDevice pickPhysicalDevice(VkInstance instance, uint32_t &queueFamilyOut) {
     uint32_t count = 0;
-    vkEnumeratePhysicalDevices(instance, &count, nullptr);
+    {
+        ScopedStderrSuppress suppress;
+        vkEnumeratePhysicalDevices(instance, &count, nullptr);
+    }
     if (count == 0) return VK_NULL_HANDLE;
     std::vector<VkPhysicalDevice> devices(count);
-    vkEnumeratePhysicalDevices(instance, &count, devices.data());
+    {
+        ScopedStderrSuppress suppress;
+        vkEnumeratePhysicalDevices(instance, &count, devices.data());
+    }
 
     VkPhysicalDevice best = VK_NULL_HANDLE;
     int bestScore = -1;
