@@ -36,14 +36,13 @@ int main() {
     opts.max_batch_size = maxBatch;
 
     vkzg_prover *p = nullptr;
-    double t0 = now_ms();
     vkzg_result rc = vkzg_prover_new(&p, &opts);
     if (rc != VKZG_OK) {
         printf("prover_new failed: %s\n", vkzg_error_string(rc));
         return 1;
     }
-    printf("device: %s (%u GPU cores)   setup: %.0f ms\n\n", vkzg_prover_device_name(p),
-           vkzg_prover_gpu_core_count(p), now_ms() - t0);
+    printf("device: %s (%u GPU cores)\n\n", vkzg_prover_device_name(p),
+           vkzg_prover_gpu_core_count(p));
 
     const size_t proofBytes = (size_t)VKZG_NUM_CELL_PROOFS * VKZG_BYTES_PER_PROOF;
 
@@ -68,7 +67,7 @@ int main() {
             best = std::min(best, ms);
             total += ms;
         }
-        printf("  %-9s best %9.2f ms   avg %9.2f ms   per blob %6.2f ms\n", label, best,
+        printf("  %-9s best %9.2f ms   avg %9.2f ms   per blob %9.2f ms\n", label, best,
                total / reps, best / n);
     };
 
