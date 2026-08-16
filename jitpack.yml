@@ -1,0 +1,4 @@
+jdk:
+  - openjdk22
+install:
+  - cd bindings/java && mvn install

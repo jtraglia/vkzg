@@ -4,5 +4,5 @@ build/
 *.so
 compile_commands.json
 *.cache
-bindings/java/out/
+bindings/java/target/
 *.class
