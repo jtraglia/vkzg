@@ -136,17 +136,12 @@ public final class Vkzg {
         proverHandle = null;
     }
 
-    /** Computes all 128 cell proofs for one blob. */
-    public static byte[] computeCellKzgProofs(byte[] blob) {
-        return computeCellKzgProofs(blob, 1);
-    }
-
     /**
      * Computes all 128 cell proofs for each of {@code blobCount} consecutive
-     * blobs packed into {@code blobs}. Returns the proofs, concatenated in
-     * the same order (128 * 48 bytes per blob). Batching is markedly more
-     * efficient per blob than repeated single-blob calls -- pass as many
-     * blobs as you have.
+     * blobs packed into {@code blobs} (pass 1 for a single blob). Returns
+     * the proofs, concatenated in the same order (128 * 48 bytes per blob).
+     * Batching is markedly more efficient per blob than repeated
+     * single-blob calls -- pass as many blobs as you have.
      */
     public static synchronized byte[] computeCellKzgProofs(byte[] blobs, long blobCount) {
         checkLoaded();

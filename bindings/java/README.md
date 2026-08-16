@@ -15,8 +15,8 @@ javac -d bindings/java/out bindings/java/vkzg/Vkzg.java
 import vkzg.Vkzg;
 
 Vkzg.init();
-byte[] proofs = Vkzg.computeCellKzgProofs(blob);       // one blob
-byte[] proofs = Vkzg.computeCellKzgProofs(blobs, n);   // batched, much cheaper per blob
+byte[] proofs = Vkzg.computeCellKzgProofs(blob, 1);   // one blob
+byte[] proofs = Vkzg.computeCellKzgProofs(blobs, n);  // batched, much cheaper per blob
 Vkzg.deinit();
 ```
 
