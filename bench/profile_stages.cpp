@@ -1,7 +1,6 @@
-// Per-stage GPU timing (development tool).  Runs the real dispatch sequence
-// in a single command buffer with timestamp queries embedded at each stage
-// boundary, so the numbers reflect actual GPU time with no extra submission
-// overhead per stage.
+// Per-stage GPU timing (development tool). Flushes the GPU between every
+// dispatch for honest per-stage numbers, at the cost of real submission
+// overhead each stage pays that the normal (single-command-buffer) path doesn't.
 #include "../include/vkzg.h"
 #include "../src/profile.h"
 

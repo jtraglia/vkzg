@@ -1,23 +1,6 @@
-// Phase B, split form: X^128-1 = (X^64-1)(X^64+1) factors the 128-point
-// circulant convolution into a 64-point cyclic half ("plus", outputs
-// a in [0,64)) and a 64-point negacyclic half ("minus", outputs a in
-// [64,128)) -- see layout_defs.h for the derivation and cost accounting,
-// and tests/test_reference.cpp for the equivalence proof against the flat
-// form using real G1 arithmetic.
-//
-// Both halves run from one dispatch (workgroup a in [0,128)) rather than
-// two, picking which half's tables to read from a uniform-per-workgroup
-// branch on `a`: on this driver, extra dispatches turned out to cost more
-// at small batch than the split saves algorithmically (see the README), so
-// this collapses what was originally two phase-B dispatches (plus a
-// separate fold and two separate reduces) down to as few as possible. The
-// cyclic half is bit-for-bit the same accumulation the original flat
-// k_phase_b.comp did, just over 64 outputs instead of 128; the negacyclic
-// half adds exactly one extra sign flip when a tap wraps past the output
-// index (e > a) -- still a fixed, precomputed item list shared by every
-// output in that half, just like the cyclic half, since that comparison
-// only needs `e` (from the item) and the half-local output index, not
-// anything the host would need to bake in per-item.
+// Phase B, split form (see layout_defs.h): workgroup a in [0,64) computes
+// the cyclic half, [64,128) the negacyclic half, both in one dispatch via a
+// uniform-per-workgroup branch on `a`.
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #include "field.glsl.inc"
@@ -71,10 +54,8 @@ void main() {
         acc = g1_madd(acc, pt);
     }
 
-    // bufBuckets has L_CIRCULANT_SIZE outputs' worth of bucket space per
-    // blob; the cyclic half fills outputs [0,64), the negacyclic half fills
-    // [64,128) -- disjoint, so both halves' 128 workgroups can share one
-    // reduce dispatch afterwards with no extra bookkeeping.
+    // The two halves fill disjoint output ranges, so they share one reduce
+    // dispatch afterwards.
     g1_store(outBuf,
              (b * L_CIRCULANT_SIZE * L_NUM_BUCKETS + a * L_NUM_BUCKETS + bucket) * L_JACOBIAN_WORDS,
              acc);

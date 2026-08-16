@@ -76,14 +76,10 @@ static void test_circulant_equivalence(const SetupTables &tables) {
     }
 }
 
-// Prototype/validation for a not-yet-implemented optimization: splitting the
-// 128-point circulant convolution via X^128-1 = (X^64-1)(X^64+1) into two
-// 64-point sub-convolutions (a plain cyclic one and a negacyclic one), which
-// in principle roughly halves the tap*output work phase B does. Deliberately
-// written as a direct O(n^2) scalar-multiply, with no bucket/digit encoding
-// at all, so this checks only the *mathematical* claim -- that the split
-// reconstructs the same output as the trusted flat form -- independent of
-// any GPU-side bucket-MSM machinery.
+// Checks the split-form math (X^128-1 = (X^64-1)(X^64+1), see layout_defs.h)
+// against the flat form with a direct O(n^2) scalar-multiply -- no bucket/
+// digit encoding -- so this validates only the math, independent of the
+// GPU-side bucket-MSM implementation.
 static void test_split_circulant_equivalence(const SetupTables &tables) {
     G1 u[kCirculantSize];
     G1 g;

@@ -69,14 +69,10 @@ int main(int argc, char **argv) {
             best = std::min(best, ms);
             total += ms;
         }
-        printf("  %-26s  best %7.2f ms   avg %7.2f ms   per blob %6.2f ms   %6.1f blobs/s\n", label,
-               best, total / reps, best / n, 1000.0 * n / best);
+        printf("  %-8s  best %7.2f ms   avg %7.2f ms   per blob %6.2f ms\n", label, best,
+               total / reps, best / n);
     };
 
-    printf("single blob\n");
-    run("1 blob", 1);
-
-    printf("\nbatched\n");
     for (uint32_t n = 1; n <= maxBatch; n *= 2) {
         char label[64];
         snprintf(label, sizeof(label), "%u blob%s", n, n == 1 ? "" : "s");

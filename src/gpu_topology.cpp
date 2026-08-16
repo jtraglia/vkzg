@@ -3,14 +3,9 @@
 #include <cstring>
 #include <vector>
 
-// The only real, portable-within-Linux signal for "how is this GPU's device
-// node reachable" is Vulkan's own VK_EXT_physical_device_drm (a (major,
-// minor) pair, not a path -- we still have to find the /dev/dri node it
-// names). Turning that into an actual core count is necessarily driver-
-// specific, since Vulkan itself has no query for it; this file has exactly
-// one such backend (Asahi's DRM_IOCTL_ASAHI_GET_PARAMS, present whenever
-// the kernel headers for it are), and is written so adding another vendor's
-// ioctl later is a second, independent branch, not a rewrite.
+// Vulkan has no core-count query, so this finds the DRM render node via
+// VK_EXT_physical_device_drm and asks the kernel driver directly. Only one
+// backend (Asahi) exists right now; add others as separate branches.
 #if defined(__linux__) && __has_include(<drm/asahi_drm.h>)
 #define VKZG_HAVE_ASAHI_TOPOLOGY 1
 #include <drm/asahi_drm.h>
@@ -48,10 +43,6 @@ std::string findDrmNode(int64_t wantMajor, int64_t wantMinor) {
     return result;
 }
 
-// Apple Silicon GPU core count via the Asahi kernel driver's own topology
-// query: the real number of clusters and cores-per-cluster this specific
-// chip has, as reported by the firmware -- not a name-based lookup table,
-// so a future chip with a different core count is picked up automatically.
 uint32_t queryAsahiTotalCores(const std::string &path) {
     const int fd = open(path.c_str(), O_RDWR);
     if (fd < 0) return 0;

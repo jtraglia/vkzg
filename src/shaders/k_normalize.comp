@@ -1,12 +1,7 @@
 // Jacobian -> affine for `count` points, Montgomery's trick per chunk.
 // Points at infinity become (0, 0), which the accumulation kernels treat as
-// the identity.
-//
-// local_size_x is fixed at 64 regardless of how few threads a given dispatch
-// actually needs; the `lo >= P.count` guard below absorbs the padded tail
-// exactly the way it already absorbed a partial last workgroup, so no
-// per-dispatch local-size tuning is needed the way Metal allowed at encode
-// time.
+// the identity. The `lo >= P.count` guard below absorbs a partial last
+// workgroup, so local_size_x can stay fixed regardless of dispatch size.
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #include "field.glsl.inc"

@@ -70,7 +70,6 @@ typedef struct {
      */
     int validate_setup;
 
-
     /*
      * Number of blobs the prover should be able to have in flight.  Larger
      * values raise steady-state throughput at the cost of memory (roughly
@@ -103,7 +102,6 @@ vkzg_result vkzg_prover_new_default(vkzg_prover **out, const vkzg_options *opts)
  */
 vkzg_result vkzg_prover_new(vkzg_prover **out, const uint8_t *g1_monomial_bytes,
                               size_t g1_monomial_len, const vkzg_options *opts);
-
 
 void vkzg_prover_free(vkzg_prover *p);
 

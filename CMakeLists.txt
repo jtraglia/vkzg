@@ -77,11 +77,8 @@ target_include_directories(vkzg
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-# -Wno-missing-field-initializers: every Vulkan struct here is deliberately
-# brace-initialized with only sType set (e.g. `VkFenceCreateInfo x{TYPE};`),
-# relying on C++ value-initialization to zero the rest -- correct and the
-# idiom used throughout this codebase, but -Wextra otherwise warns on every
-# single field a large Vulkan struct doesn't explicitly list.
+# Vulkan structs are brace-initialized with only sType set (rest zeroed by
+# C++ value-init), which -Wextra otherwise complains about on every field.
 target_compile_options(vkzg PRIVATE -Wall -Wextra -Wno-missing-field-initializers -O3)
 target_link_libraries(vkzg PUBLIC Vulkan::Vulkan)
 set_target_properties(vkzg PROPERTIES

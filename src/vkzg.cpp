@@ -1,12 +1,8 @@
 // Vulkan host layer and public API implementation.
 //
 // Buffers are passed to kernels as raw GPU addresses (VK_KHR_buffer_device_
-// address) via push constants rather than descriptor sets: every buffer is
-// allocated HOST_VISIBLE | HOST_COHERENT (the direct analogue of Metal's
-// MTLResourceStorageModeShared, and the natural choice on Apple Silicon's
-// unified memory) and persistently mapped, and its VkDeviceAddress is fetched
-// once at allocation time. This keeps the dispatch code below close in shape
-// to the Metal original, which passed buffers the same way.
+// address) via push constants rather than descriptor sets. Every buffer is
+// HOST_VISIBLE | HOST_COHERENT and persistently mapped.
 #include "vkzg.h"
 #include "cpu/bls12_381.h"
 #include "cpu/setup.h"
@@ -39,16 +35,9 @@ double nowMs() {
     return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
 }
 
-// Mesa's Honeykrisp driver logs "MESA: error: Opening /dev/dri/cardN failed:
-// Permission denied" straight to stderr while enumerating physical devices --
-// it's probing every DRM node on the system, including KMS/display nodes
-// this process has no use for, not something vkEnumeratePhysicalDevices
-// itself fails on (the render node this library actually ends up using is
-// world-readable and works fine either way). There's no Vulkan API to quiet
-// a driver's own stderr logging, so this redirects fd 2 to /dev/null only
-// around the specific call that triggers it and restores it immediately
-// after, so any real stderr output (this process's own, or a later Vulkan
-// call's) is unaffected.
+// Mesa logs harmless "Permission denied" errors to stderr while probing
+// DRM nodes during device enumeration; there's no Vulkan API to quiet a
+// driver's own logging, so suppress fd 2 around just that call.
 struct ScopedStderrSuppress {
     int saved = -1;
     ScopedStderrSuppress() {
@@ -327,10 +316,8 @@ vkzg_prover::~vkzg_prover() {
 
 namespace {
 
-// Required so every kernel's buffer_reference pointers, 8/16-bit storage
-// buffers and 64-bit scalars work; verified against this project's actual
-// target (Mesa's Honeykrisp Vulkan driver on Apple Silicon, Vulkan 1.4
-// conformant) but written against the portable Vulkan 1.2 core feature bits.
+// Required for every kernel's buffer_reference pointers, 8/16-bit storage
+// buffers and 64-bit scalars.
 bool physicalDeviceSuitable(VkPhysicalDevice dev, uint32_t &queueFamilyOut) {
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(dev, &props);
@@ -763,21 +750,9 @@ struct ReducePC {
     uint32_t count;
 };
 
-// Picks the reduce dispatch's lane count (see the comment above
-// L_REDUCE_LANES in layout_defs.h) from the batch size and the GPU's real
-// core count, rather than a fixed constant or a device-name guess.
-//
-// k_bucket_reduce.comp dispatches (count / (32/lanes)) * batch workgroups;
-// at the default lane count that's (L_REDUCE_LANES * count / 32) * batch.
-// The latency variant (2x the lanes) wins when that count leaves each core
-// with only a handful of workgroups to hide the reduce loop's serial
-// latency behind; the threshold below (~6 workgroups/core at the default
-// lane count) is fit to the two GPUs this has actually been measured on
-// (an 8-core Apple M1: crossover between batch 2 and batch 4; a 64-core M1
-// Ultra: a clear win at batch 1, a small loss by batch 64) rather than
-// derived from first principles, so treat it as a starting point, not a
-// proven constant -- it should be revisited if measurements on a
-// differently-shaped GPU disagree with it.
+// Picks the reduce dispatch's lane count (see layout_defs.h) from batch size
+// and GPU core count. The threshold is fit to measurements on two GPUs, not
+// derived -- revisit if it disagrees with a differently-shaped GPU.
 bool useLatencyReduce(uint32_t count, uint32_t batch, uint32_t gpuTotalCores) {
     if (gpuTotalCores == 0) return false; // unknown topology: keep the safe default
     constexpr uint32_t kWorkgroupsPerCoreThreshold = 6;
@@ -812,20 +787,8 @@ void recordNormalize(VkCommandBuffer cmd, vkzg_prover *p, const VkBuf &outAffine
 }
 
 // Ends, submits and waits on `cmd`, then reopens it for further recording.
-// Used only when profiling: it turns one command buffer into N synchronous
-// round-trips, so it costs real submission overhead (~0.1ms/flush) and must
-// never run on the production path.
-//
-// This replaced an earlier attempt at profiling via vkCmdWriteTimestamp +
-// VkQueryPool, which looked reasonable but produced numbers that didn't add
-// up: the "normalize ladder" bucket consistently read ~1.4s regardless of
-// how much (or how little) work that dispatch actually had to do, while
-// varying wildly between otherwise-identical runs which *other* bucket
-// absorbed the real cost. Forcing a CPU-side drain between every dispatch
-// (this function) and comparing gave a stable, reproducible breakdown where
-// the two MSM phases dominate, as expected — so the timestamp path was
-// mismeasuring on this driver, not the kernels misbehaving. Given that, this
-// slower-but-trustworthy approach is what `profile_stages` uses.
+// Used only when profiling (real submission overhead per call) -- never on
+// the production path.
 double flushAndTime(vkzg_prover *p, VkCommandBuffer &cmd, double &prev) {
     vkEndCommandBuffer(cmd);
     vkResetFences(p->device, 1, &p->fence);
@@ -911,12 +874,6 @@ vkzg_result computeBatch(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs, 
     flush(&st.reduce_a);
 
     // 5. doubling ladder over u[j], then fold into L+/L- (see layout_defs.h).
-    // Kept as two dispatches, each with a single G1 accumulator per thread:
-    // an earlier version folded while doubling (one thread driving both
-    // u[j]'s and u[j+64]'s chains at once, halving thread count but doubling
-    // live registers per thread) and that measured *worse* on this driver,
-    // most likely from the occupancy hit of doubled register pressure
-    // outweighing the saved dispatch.
     {
         struct { uint64_t ladderAddr, uAddr; } pc{p->bufLadderJac.addr, p->bufPoints.addr};
         dispatch(cmd, p->psoLadder, p->pipelineLayout, pc, kCirculantSize / 32, batch);
@@ -935,13 +892,8 @@ vkzg_result computeBatch(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs, 
                     inversionChunk(ladderPoints, 32, 128, 8192));
     flush(&st.normalize_ladder);
 
-    // 6. phase B, split form (X^128-1 = (X^64-1)(X^64+1); see layout_defs.h):
-    // one dispatch computes both the cyclic and negacyclic halves (workgroup
-    // a in [0,64) is the cyclic half, [64,128) the negacyclic half; see
-    // k_phase_b_split.comp), writing into disjoint halves of bufBuckets, so
-    // one reduce call handles both at once. bufPoints is reused as scratch
-    // for the reduced C+/C- pair since nothing else needs its prior contents
-    // by this point.
+    // 6. phase B, split form (see layout_defs.h). bufPoints is reused as
+    // scratch for the reduced C+/C- pair; nothing else needs it by now.
     {
         struct {
             uint64_t outAddr, ladderAddr;
@@ -1023,10 +975,6 @@ vkzg_result vkzg_compute_proofs_batch(vkzg_prover *p, uint8_t *proofs, const uin
 }
 
 // ------------------------------------------------------------------ profiling
-//
-// Development helper: computeBatch records what it measured into the prover,
-// and this just runs it and hands the numbers back.  Reporting the real path
-// matters here rather than a separate re-implementation of the dispatch order.
 #include "profile.h"
 
 namespace vkzg {

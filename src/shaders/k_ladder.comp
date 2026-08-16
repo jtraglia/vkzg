@@ -1,27 +1,6 @@
-// L[j][d] = 2^(8d) * u[j], the shared base set for phase B.
-//
-// This is 248 sequential doublings over 128 points per blob, so at small batch
-// sizes it is latency-bound rather than throughput-bound; batching is what
-// makes it cheap, since the parallelism is 128 * blobs.
-//
-// local_size_x is 32 rather than the 8 the Metal original used: each
-// thread's chain is fully independent (no shared memory, no barriers), so
-// workgroup size is pure scheduling and doesn't touch correctness. On this
-// driver 8-wide workgroups measured ~369ms of a 3.5s batch-64 call;
-// widening to 32 dropped that to ~98ms -- a real win, not a rounding error,
-// most likely from filling out the 32-wide subgroup instead of leaving 3/4
-// of it idle every dispatch.
-//
-// 32 rather than 128: at 128, one workgroup covers a whole blob's 128
-// points, so batch 1 dispatches only 1 workgroup total -- nowhere near
-// enough to spread across a GPU with many independent compute clusters
-// (an M1 Ultra measured this stage slower than an 8-core M1 at batch 1,
-// despite having 8x the cores). Narrowing to 32 quarters the per-workgroup
-// point count and quadruples the workgroup count for the same total work,
-// which is what actually lets a bigger GPU help; each thread's chain stays
-// independent either way so correctness is unaffected. Confirmed harmless
-// on the 8-core M1 across the whole batch range before assuming it would
-// also help the Ultra.
+// L[j][d] = 2^(8d) * u[j], the shared base set for phase B: 248 sequential
+// doublings over 128 points per blob, so it's latency-bound at small batch.
+// Each thread's chain is independent, so local_size_x is pure scheduling.
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #include "field.glsl.inc"

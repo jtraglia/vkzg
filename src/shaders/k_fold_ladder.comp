@@ -1,18 +1,10 @@
 // Folds the 128-position doubling ladder into the two 64-position ladders
-// phase B's split form needs: L+[j][d] = L[j][d] + L[j+64][d], L-[j][d] =
-// L[j][d] - L[j+64][d], for j in [0,64) and every ladder position d.
+// phase B's split form needs (see layout_defs.h): L+[j][d] = L[j][d] +
+// L[j+64][d], L-[j][d] = L[j][d] - L[j+64][d].
 //
-// This is the "costs only additions in the ladder domain" step the split
-// (X^128-1 = (X^64-1)(X^64+1)) trades for roughly halving phase B's
-// bucket-MSM work -- see layout_defs.h. Writes into a separate buffer rather
-// than folding in place: L+[j] and L-[j] both read L[j] and L[j+64], and for
-// j < 64 the plus/minus *output* slot aliases one of those two *input*
-// slots, so in-place folding would race against itself.
-//
-// Output layout matches what k_phase_b_split.comp and the (existing)
-// k_normalize.comp expect: positions [0, 64) are L+, positions [64, 128) are
-// L-, same per-blob stride as the unfolded ladder so the buffer this writes
-// into is a drop-in normalize source (see vkzg.cpp).
+// Writes into a separate buffer rather than folding in place: for j < 64 the
+// output slot aliases one of the two input slots it reads, so in-place
+// folding would race against itself.
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #include "field.glsl.inc"

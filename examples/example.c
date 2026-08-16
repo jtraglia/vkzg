@@ -18,7 +18,7 @@ int main(void) {
     /* Deriving the FK20 tables from the setup takes about a second; caching
      * them brings subsequent starts down to ~60ms. */
     opts.table_cache_path = "/tmp/vkzg_prover_tables.cache";
-    opts.max_batch_size = 16; /* batch to keep the GPU busy; see the README */
+    opts.max_batch_size = 16;
 
     vkzg_prover *prover = NULL;
     vkzg_result rc = vkzg_prover_new_default(&prover, &opts);

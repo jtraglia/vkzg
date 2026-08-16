@@ -15,7 +15,6 @@ namespace vkzg_test {
 struct Vector {
     std::string name;
     std::vector<uint8_t> blob;
-    std::vector<uint8_t> cells;  // 128 * 2048, empty when invalid
     std::vector<uint8_t> proofs; // 128 * 48, empty when invalid
     bool valid = false;
 };
@@ -64,13 +63,6 @@ inline bool parse_vector(const std::string &path, const std::string &name, Vecto
     if (!v.valid) return true;
     if (spans.size() != 1 + 128 + 128) return false;
 
-    v.cells.reserve(128 * 2048);
-    for (size_t i = 1; i <= 128; i++) {
-        std::vector<uint8_t> tmp;
-        to_bytes(spans[i].first, spans[i].second, tmp);
-        if (tmp.size() != 2048) return false;
-        v.cells.insert(v.cells.end(), tmp.begin(), tmp.end());
-    }
     v.proofs.reserve(128 * 48);
     for (size_t i = 129; i <= 256; i++) {
         std::vector<uint8_t> tmp;

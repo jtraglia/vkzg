@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Compile the GLSL compute kernels to SPIR-V and embed them as byte arrays.
 
-Vulkan consumes SPIR-V modules, not shader source, so (unlike the Metal
-original, which embedded MSL source and compiled it at load time) this embeds
-the SPIR-V words compiled ahead of time by glslangValidator. Either way the
-built library stays self-contained: no .spv files to locate at runtime.
+Embeds SPIR-V words compiled ahead of time by glslangValidator, so the
+built library is self-contained: no .spv files to locate at runtime.
 
 Usage: embed_shaders.py <out.h> <glslangValidator> <include_dirs> <k1.comp> <k2.comp> ...
 

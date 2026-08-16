@@ -1,24 +1,19 @@
 // BLS12-381 arithmetic for GLSL compute shaders (Vulkan).
 //
 // Fp is 12 x 32-bit limbs, Fr is 8 x 32-bit limbs, both little-endian and in
-// Montgomery form.  Multiplication is CIOS with a 64-bit accumulator, mapping
-// onto the same widening-multiply hardware path Metal's `(ulong)a*b` used.
+// Montgomery form. Multiplication is CIOS with a 64-bit accumulator.
 //
 // The constants block (FP_P, FP_N0, ...) is included from
-// bls12_381_constants.glsl.inc, which is generated alongside the host
-// constants so the two limb representations cannot drift.
+// bls12_381_constants.glsl.inc, generated alongside the host constants so
+// the two limb representations cannot drift.
 //
-// Buffers are passed between host and shader as raw GPU addresses
-// (VK_KHR_buffer_device_address) rather than descriptor-bound arrays, so
-// every kernel's buffer arguments are `buffer_reference` pointers -- the
-// closest GLSL analogue of Metal's `device T *` arguments, and it keeps the
-// shape of the kernels below close to the .metal originals.
+// Buffers are passed as raw GPU addresses (VK_KHR_buffer_device_address)
+// rather than descriptor-bound arrays, so every kernel's buffer arguments
+// are `buffer_reference` pointers.
 //
-// Every small fixed-trip-count loop below is marked [[unroll]], matching the
-// `#pragma clang loop unroll(full)` the Metal original used throughout: with
-// no hint, glslang emits a plain SPIR-V loop (OpLoopMerge ... None) and lets
-// the driver's backend decide, and on this driver that turned out to matter
-// a lot for fp_inv specifically (see the [[dont_unroll]] note there).
+// Every small fixed-trip-count loop below is marked [[unroll]] -- without
+// it, glslang's default codegen is much slower here (see the [[dont_unroll]]
+// note on fp_inv for the one case where the opposite is true).
 
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_buffer_reference2 : require
@@ -397,8 +392,7 @@ G1 g1_sub(G1 a, G1 b) { return g1_add(a, g1_neg(b)); }
 // ------------------------------------------------------------ memory access
 //
 // Buffers are buffer_reference pointers; `off` is a 32-bit element index
-// (word/limb/byte index depending on the buffer's element type), matching
-// the word offsets the .metal originals computed before dereferencing.
+// (word/limb/byte index depending on the buffer's element type).
 
 Fp fp_load(U32Buf buf, uint off) {
     Fp r;
@@ -451,15 +445,9 @@ G1 g1_shuffle_down(G1 p, uint delta) {
     return r;
 }
 
-// Collapses 128 buckets into sum_{k=1}^{128} k * B[k-1].
-//
-// `lanes` threads cooperate on one output, each first collapsing a
-// contiguous run of buckets with a serial running sum, then combining across
-// lanes with a shuffle tree.  `lanes` is a specialization constant at the
-// call site (k_bucket_reduce.comp), not a compile-time macro here, so the
-// same shader binary can be instantiated as more than one PSO -- see that
-// file and recordReduce in vkzg.cpp for why the lane count varies
-// per dispatch. The maths is unchanged from the Metal original.
+// Collapses 128 buckets into sum_{k=1}^{128} k * B[k-1]. `lanes` threads
+// cooperate on one output: each collapses a contiguous run serially, then
+// they combine with a shuffle tree.
 G1 reduce_buckets(U32Buf buckets, uint base, uint pos, uint lanes) {
     const uint per_lane = L_NUM_BUCKETS / lanes;
 
@@ -503,19 +491,13 @@ G1 reduce_buckets(U32Buf buckets, uint base, uint pos, uint lanes) {
 
 // ------------------------------------------------------- inversion, encoding
 
-// a^(p-2) by square-and-multiply.  ~381 squarings and ~190 multiplies, so the
-// dependency chain is ~570 F_p multiplies deep.  That is a fixed cost per
-// dispatch regardless of how many points are being normalised, which is why
-// the batched Montgomery trick around it matters: one inversion serves a
-// whole chunk.
+// a^(p-2) by square-and-multiply: ~570 F_p multiplies deep, a fixed cost
+// regardless of point count, which is why the batched Montgomery trick
+// around it matters (one inversion serves a whole chunk).
 //
-// [[dont_unroll]] on both loops here is deliberate and matters a lot: fully
-// unrolling 12*32 = 384 iterations of branchy code bloats this function
-// enormously, and on this driver that showed up as k_normalize's inversion
-// pass taking orders of magnitude longer than the point count alone would
-// predict (a `normalize_ladder` call at batch 64 dropped from ~1.4s to a few
-// ms once this was added) -- almost certainly register-pressure/occupancy
-// collapse from the bloated unrolled code, not any change to the algorithm.
+// [[dont_unroll]] on both loops matters a lot here: unrolling all 12*32
+// iterations bloats this function and made k_normalize dramatically slower
+// (register-pressure/occupancy collapse), unlike the small loops elsewhere.
 Fp fp_inv(Fp a) {
     Fp acc = a;
     bool started = false;

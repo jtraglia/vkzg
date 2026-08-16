@@ -53,7 +53,6 @@ constexpr int kFrLimbs = L_FR_WORDS;
 constexpr int kAffineWords = L_AFFINE_WORDS;
 constexpr int kJacobianWords = L_JACOBIAN_WORDS;
 
-
 // Total number of precomputed setup points: one per (output, base, position).
 constexpr int kPositionTablePoints = kCirculantSize * kPhaseATerms * kNumDigits; // 262144
 constexpr size_t kPositionTableWords = (size_t)kPositionTablePoints * kAffineWords;
