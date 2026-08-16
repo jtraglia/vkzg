@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
     for (const auto &v : vectors) {
         std::vector<uint8_t> proofs(proofBytes);
         vkzg_result r = v.blob.size() == VKZG_BYTES_PER_BLOB
-                             ? vkzg_compute_proofs(p, proofs.data(), v.blob.data())
+                             ? vkzg_compute_proofs(p, proofs.data(), v.blob.data(), 1)
                              : VKZG_ERR_BADARGS;
         if (!v.valid) {
             if (r == VKZG_OK) {
@@ -101,7 +101,7 @@ int main(int argc, char **argv) {
                 memcpy(&blobs[i * VKZG_BYTES_PER_BLOB], valid[i]->blob.data(), VKZG_BYTES_PER_BLOB);
             }
             std::vector<uint8_t> proofs(n * proofBytes);
-            vkzg_result r = vkzg_compute_proofs_batch(p, proofs.data(), blobs.data(), n);
+            vkzg_result r = vkzg_compute_proofs(p, proofs.data(), blobs.data(), n);
             bool ok = r == VKZG_OK;
             for (size_t i = 0; ok && i < n; i++) {
                 ok &= memcmp(&proofs[i * proofBytes], valid[i]->proofs.data(), proofBytes) == 0;
@@ -129,9 +129,9 @@ int main(int argc, char **argv) {
             const char *what;
             vkzg_result got;
         } checks[] = {
-            {"null prover", vkzg_compute_proofs(nullptr, proofs.data(), v->blob.data())},
-            {"null blob", vkzg_compute_proofs(p, proofs.data(), nullptr)},
-            {"null proofs", vkzg_compute_proofs(p, nullptr, v->blob.data())},
+            {"null prover", vkzg_compute_proofs(nullptr, proofs.data(), v->blob.data(), 1)},
+            {"null blob", vkzg_compute_proofs(p, proofs.data(), nullptr, 1)},
+            {"null proofs", vkzg_compute_proofs(p, nullptr, v->blob.data(), 1)},
         };
         for (const auto &c : checks) {
             if (c.got != VKZG_ERR_BADARGS) {
@@ -142,7 +142,7 @@ int main(int argc, char **argv) {
             }
         }
         // Zero blobs is a no-op, not an error.
-        if (vkzg_compute_proofs_batch(p, proofs.data(), v->blob.data(), 0) != VKZG_OK) {
+        if (vkzg_compute_proofs(p, proofs.data(), v->blob.data(), 0) != VKZG_OK) {
             printf("FAIL: zero-length batch should succeed\n");
             g_failures++;
         } else {
@@ -155,7 +155,7 @@ int main(int argc, char **argv) {
         for (size_t i = 0; i < big; i++) {
             memcpy(&blobs[i * VKZG_BYTES_PER_BLOB], v->blob.data(), VKZG_BYTES_PER_BLOB);
         }
-        bool ok = vkzg_compute_proofs_batch(p, bp.data(), blobs.data(), big) == VKZG_OK;
+        bool ok = vkzg_compute_proofs(p, bp.data(), blobs.data(), big) == VKZG_OK;
         for (size_t i = 0; ok && i < big; i++) {
             ok &= memcmp(&bp[i * proofBytes], v->proofs.data(), proofBytes) == 0;
         }
@@ -182,7 +182,7 @@ int main(int argc, char **argv) {
                 std::vector<uint8_t> proofs(proofBytes);
                 for (int r = 0; r < 3; r++) {
                     const auto *v = valid[(size_t)(t + r) % valid.size()];
-                    if (vkzg_compute_proofs(p, proofs.data(), v->blob.data()) != VKZG_OK ||
+                    if (vkzg_compute_proofs(p, proofs.data(), v->blob.data(), 1) != VKZG_OK ||
                         memcmp(proofs.data(), v->proofs.data(), proofBytes) != 0) {
                         bad++;
                     }

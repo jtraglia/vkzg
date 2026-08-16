@@ -81,22 +81,18 @@ const char *vkzg_prover_device_name(const vkzg_prover *p);
 /* ---------------------------------------------------------------- compute */
 
 /*
- * Compute all 128 cell proofs for one blob.
+ * Compute all 128 cell proofs for each of `num_blobs` consecutive blobs.
  *
- * `blob`   is VKZG_BYTES_PER_BLOB bytes: 4096 big-endian canonical field
- *          elements.
- * `proofs` receives VKZG_NUM_CELL_PROOFS * VKZG_BYTES_PER_PROOF bytes.
+ * `blobs`  is `num_blobs` consecutive VKZG_BYTES_PER_BLOB-byte blobs: 4096
+ *          big-endian canonical field elements each.
+ * `proofs` receives `num_blobs` consecutive VKZG_NUM_CELL_PROOFS *
+ *          VKZG_BYTES_PER_PROOF byte arrays.
+ *
+ * Batching keeps the GPU saturated and is markedly more efficient per blob
+ * than repeated single-blob calls -- pass as many blobs as you have.
  */
-vkzg_result vkzg_compute_proofs(vkzg_prover *p, uint8_t *proofs, const uint8_t *blob);
-
-/*
- * Batched form.  `blobs` is `num_blobs` consecutive blobs; `proofs` is the
- * corresponding consecutive output array.  Batching keeps the GPU saturated
- * and is markedly more efficient per blob than repeated single calls -- this
- * is the entry point supernodes should use.
- */
-vkzg_result vkzg_compute_proofs_batch(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs,
-                                        size_t num_blobs);
+vkzg_result vkzg_compute_proofs(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs,
+                                  size_t num_blobs);
 
 #ifdef __cplusplus
 } /* extern "C" */

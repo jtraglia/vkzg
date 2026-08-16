@@ -37,7 +37,7 @@ int main(void) {
 
     uint8_t *proofs = malloc((size_t)VKZG_NUM_CELL_PROOFS * VKZG_BYTES_PER_PROOF);
 
-    rc = vkzg_compute_proofs(prover, proofs, blob);
+    rc = vkzg_compute_proofs(prover, proofs, blob, 1);
     if (rc != VKZG_OK) {
         fprintf(stderr, "compute failed: %s\n", vkzg_error_string(rc));
         return 1;

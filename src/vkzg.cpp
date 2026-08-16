@@ -930,12 +930,8 @@ vkzg_result computeBatch(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs, 
 
 } // namespace
 
-vkzg_result vkzg_compute_proofs(vkzg_prover *p, uint8_t *proofs, const uint8_t *blob) {
-    return vkzg_compute_proofs_batch(p, proofs, blob, 1);
-}
-
-vkzg_result vkzg_compute_proofs_batch(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs,
-                                        size_t num_blobs) {
+vkzg_result vkzg_compute_proofs(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs,
+                                  size_t num_blobs) {
     if (!p || !blobs || !proofs) return VKZG_ERR_BADARGS;
     if (num_blobs == 0) return VKZG_OK;
 

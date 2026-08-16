@@ -55,11 +55,11 @@ int main(int argc, char **argv) {
 
     auto run = [&](const char *label, uint32_t n) {
         // warm up
-        vkzg_compute_proofs_batch(p, proofs.data(), blobs.data(), n);
+        vkzg_compute_proofs(p, proofs.data(), blobs.data(), n);
         double best = 1e30, total = 0;
         for (int r = 0; r < reps; r++) {
             double a = now_ms();
-            vkzg_result e = vkzg_compute_proofs_batch(p, proofs.data(), blobs.data(), n);
+            vkzg_result e = vkzg_compute_proofs(p, proofs.data(), blobs.data(), n);
             double ms = now_ms() - a;
             if (e != VKZG_OK) {
                 printf("  %s: error %s\n", label, vkzg_error_string(e));

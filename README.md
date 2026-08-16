@@ -30,8 +30,7 @@ opts.max_batch_size = 16;
 vkzg_prover *prover;
 vkzg_prover_new(&prover, &opts);
 
-vkzg_compute_proofs(prover, proofs, blob);
-vkzg_compute_proofs_batch(prover, proofs, blobs, n);
+vkzg_compute_proofs(prover, proofs, blobs, n);
 ```
 
 The whole API is in [`include/vkzg.h`](include/vkzg.h), plain C, thread-safe.
