@@ -36,29 +36,30 @@ Apple M1, 8 GPU cores, Fedora Asahi Remix, Mesa 26.1.6 (Honeykrisp):
 
 | | ms/blob | blobs/s |
 |---|---|---|
-| batch 1 | 125.4 | 8.0 |
-| batch 8 | 50.1 | 20.0 |
-| batch 16 | 47.1 | 21.2 |
-| batch 32 | 45.9 | 21.8 |
-| batch 64 | 45.1 | 22.2 |
-| **batch 128** | **44.5** | **22.5** |
+| batch 1 | 109.5 | 9.1 |
+| batch 8 | 50.2 | 19.9 |
+| batch 16 | 46.1 | 21.7 |
+| batch 32 | 46.0 | 21.7 |
+| batch 64 | 45.0 | 22.2 |
+| **batch 128** | **44.8** | **22.3** |
 
 **This now beats the original `metal-prover`'s Metal numbers on the same
-8-core M1** (46.8 ms/blob, 21.4 blobs/s at batch 64) — not by inherently
-being faster than Metal, but because phase B no longer does the amount of
-work the Metal version's algorithm did: see
+8-core M1 at every batch size**, including unbatched (46.8 ms/blob at batch
+64 on Metal vs 45.0 here; 120.2 ms/blob at batch 1 on the pre-split Vulkan
+build vs 109.5 here) — not by inherently being faster than Metal or than the
+flat form, but because phase B no longer does the amount of work either of
+those did: see
 [the split-convolution rewrite](#4-the-128-point-convolution-splits-into-two-64-point-ones)
-below. Batch 1 is the one regression (110.6 → 125.4 ms/blob unbatched, since
-the split form pays for a handful of extra small dispatches that don't pay
-for themselves until there's enough batch to amortise them) — irrelevant for
-the high-throughput batched use this library targets, but worth knowing if
-you were relying on low-batch latency specifically.
+below. Getting *every* batch size to improve took a second pass after the
+first version of the split regressed batch 1 by throwing away too much
+throughput on extra dispatches — worth reading if you're chasing a similar
+optimization, since the fix (collapsing dispatches back down, but not
+uniformly — one merge helped, a very similar-looking one hurt) is the
+non-obvious part.
 
-An Apple M1 Ultra (64 GPU cores), same driver stack, on the same real
-hardware — not extrapolated, but measured *before* everything in
-[How it works](#how-it-works-and-why-it-looks-like-this) below, so treat it
-as a shape (how it scales with core count) rather than a number that's still
-current:
+An Apple M1 Ultra (64 GPU cores), same driver stack — the shape of this
+project's very first Vulkan port, before any of the optimization work
+in [How it works](#how-it-works-and-why-it-looks-like-this) below:
 
 | | ms/blob | blobs/s |
 |---|---|---|
@@ -68,19 +69,24 @@ current:
 | batch 32 | 12.3 | 81.1 |
 | **batch 64** | **11.9** | **83.9** |
 
-8× the GPU cores buys ~5× the throughput at batch 64 (45→12 ms/blob), not
-8×: some stages (the ladder, the batched inversions) are latency-bound
-rather than throughput-bound, so they don't scale with core count the way
-the two MSM phases do. It also means small batches leave far more of a
-64-core part idle: batch 1 is 10× slower per blob than batch 64 on the
-Ultra, versus under 1.5× on the 8-core M1.
+8× the GPU cores bought ~5× the throughput at batch 64 there (55→12 ms/blob,
+comparing against the 8-core M1's number at the time), not 8×: some stages
+(the ladder, the batched inversions) are
+latency-bound rather than throughput-bound, so they don't scale with core
+count the way the two MSM phases do. It also meant small batches left far
+more of a 64-core part idle than they did on the 8-core M1. This table
+predates the split-convolution work below and hasn't been re-measured since
+on that hardware — treat it as a scaling *shape*, not a current number; a
+GPU with 8x the cores plausibly also has a lower threshold for "batch big
+enough to amortise a dispatch", so the small-batch fix above may behave
+differently there than it did on the 8-core M1.
 
 ### Batching
 
 Batch at least 8. Two stages need it: the doubling ladder is 128 independent
 chains per blob (128 × batch threads), and the batched inversions amortise a
 multi-millisecond field inversion across their chunk. Below batch 8 both are
-latency-bound and you pay for it — batch 1 costs almost 3× batch 128's
+latency-bound and you pay for it — batch 1 costs almost 2.5× batch 128's
 per-blob time.
 
 Working set is **5.6 MiB per blob** plus a fixed ~28 MiB (the 24 MiB FK20
@@ -208,8 +214,7 @@ phase A: fixed-base bucket MSM            GPU
 doubling ladder 2^(8d)·u[j]               GPU
 fold ladder into L+/L- (see below)        GPU
 ladder → affine (batched inversion)       GPU
-phase B+: cyclic half of the circulant    GPU
-phase B-: negacyclic half of the circulant GPU
+phase B: cyclic + negacyclic circulant halves  GPU  (one dispatch, see below)
 combine: out[a] = C+[a] ± C-[a]           GPU
 proofs → affine → compressed              GPU
 ```
@@ -313,18 +318,38 @@ Two things made this worth doing rather than a purely theoretical curiosity:
 
 The fold itself (`u±[j] = u[j] ± u[j+64]`) runs on the already-computed
 doubling ladder (`k_fold_ladder.comp`) — cheap point additions, not new
-scalar multiplications, matching the "costs only additions" framing. Both
-halves reuse the *same* bucket-MSM kernel (`k_phase_b_split.comp`), just
-with a push-constant flag selecting cyclic vs. negacyclic and which half of
-the folded ladder to read; a final tiny kernel (`k_combine_split.comp`)
-does the `C+ ± C-` reconstruction.
+scalar multiplications, matching the "costs only additions" framing.
 
-Measured on the 8-core M1 (batch 64): phase B's total cost (both bucket-MSM
-dispatches, both reductions, the combine step) dropped from ~1716ms to
-~1042ms of a batch-64 call — about 39%, short of the ~49% theoretical cut
-because the split form pays for three extra dispatches the flat form didn't
-need (the fold, a second bucket-MSM, a second reduce). Net effect on total
-throughput: ~18% faster at batch ≥ 8 — see [Results](#results).
+**Both halves run as one dispatch, not two.** The first working version gave
+each half its own bucket-MSM dispatch and its own reduce, four dispatches
+total (2 bucket-MSMs + 2 reduces) where the flat form needed two (1 + 1).
+That measured a large win at big batch but a real loss at batch 1 (see
+[Results](#results)) — each extra dispatch's fixed overhead (submission, the
+`vkCmdPipelineBarrier` after it) costs more than the algorithmic saving when
+there's only one blob's work to amortise it over, and that cost doesn't
+disappear just because the *algorithm* got cheaper. The fix:
+`k_phase_b_split.comp` runs across all 128 outputs in one dispatch, with a
+uniform-per-workgroup branch on the output index (`a < 64` → cyclic half,
+`a >= 64` → negacyclic half, picking which half's item list/ladder-half to
+read); since the two halves write disjoint ranges of the bucket buffer, one
+`k_bucket_reduce.comp` call reduces both at once, and a final tiny kernel
+(`k_combine_split.comp`) does the `C+ ± C-` reconstruction. Net: one extra
+dispatch over the flat form (`k_combine_split.comp`), not four.
+
+Not every merge like this is a win, though — worth knowing if you go looking
+for more. An attempt to also fold `k_ladder.comp` and `k_fold_ladder.comp`
+into one dispatch (one thread driving both `u[j]`'s and `u[j+64]`'s doubling
+chains at once, halving thread count but doubling each thread's live
+registers) measured *worse* at every batch size than keeping them separate,
+almost certainly from the occupancy cost of doubled register pressure
+outweighing the dispatch it saved. So the ladder stays two dispatches; only
+phase B's collapsed to one.
+
+Measured on the 8-core M1 (batch 64): phase B's total cost (the merged
+bucket-MSM dispatch, the merged reduce, the combine step) dropped from
+~1716ms to ~1030ms of a batch-64 call — about 40%, close to the ~49%
+theoretical cut. Net effect on total throughput: faster at *every* batch
+size tested, not just batch ≥ 8 — see [Results](#results).
 
 ## Checking the tuning on your own GPU
 
@@ -446,20 +471,23 @@ cannot drift.
 
 - **Vulkan-specific tuning is partially done** — see
   [Checking the tuning](#checking-the-tuning-on-your-own-gpu) for what's been
-  checked (the profiler itself, the ladder's workgroup size, `L_REDUCE_LANES`)
+  checked (the profiler itself, the ladder's workgroup size, `L_REDUCE_LANES`,
+  now also the split form's dispatch count — see
+  [How it works](#4-the-128-point-convolution-splits-into-two-64-point-ones))
   and what's still open (`inversionChunk`, the per-dispatch barriers, other
-  kernels' workgroup sizes, and now also the split form's own three extra
-  dispatches — see [How it works](#4-the-128-point-convolution-splits-into-two-64-point-ones)).
-  This library now runs *faster* than the original Metal build on the same
-  8-core M1, so this is no longer about closing a gap, just further headroom.
+  kernels' workgroup sizes). This library now runs *faster* than the original
+  Metal build at every batch size on the same 8-core M1, so this is no longer
+  about closing a gap, just further headroom.
 - **Recursing the split further** (`X⁶⁴−1 = (X³²−1)(X³²+1)`, and so on) keeps
   halving tap density in the same self-similar way; a back-of-envelope check
   during development (plain field arithmetic, no GPU) found the *tap ×
   output* cost keeps dropping at every level (8320 → 4224 → 2176 → 1152 →
-  ...), but each level also adds fixed per-dispatch overhead (another fold,
-  another bucket-MSM pair, another combine), so there's a real
-  diminishing-returns point past the one level implemented here. Not
-  measured where that point is on this driver.
+  ...). Whether another level is worth it depends entirely on whether it can
+  be done, like this one ended up being, as a single dispatch per stage
+  rather than one per half — the algorithmic saving is real but this
+  session's experience is that it's easy to spend it (and more) on
+  dispatch-count growth if you're not careful about how the halves are
+  combined. Not attempted past one level.
 - **GLV** would halve the ladder's depth (248 → 120 doublings) and its memory,
   which matters most at small batch where the ladder is latency-bound. The
   host-side pieces (`glv_split`, the endomorphism) are implemented and tested;

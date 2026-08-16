@@ -278,8 +278,8 @@ vkp_prover::~vkp_prover() {
     destroyBuffer(device, bufKernelOffsetsMinus);
     destroyBuffer(device, bufKernelPermMinus);
     for (VkPipeline pso : {psoBlobToFr, psoNtt, psoBuildCirculant, psoPhaseASort, psoPhaseA,
-                           psoLadder, psoFoldLadder, psoPhaseBSplit, psoCombineSplit, psoNormalize,
-                           psoCompress, psoReduce}) {
+                           psoLadder, psoFoldLadder, psoPhaseBSplit, psoCombineSplit, psoNormalize, psoCompress,
+                           psoReduce}) {
         if (pso) vkDestroyPipeline(device, pso, nullptr);
     }
     if (pipelineLayout) vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
@@ -787,20 +787,19 @@ vkp_result computeBatch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs, ui
     recordReduce(cmd, p, p->bufPoints, kCirculantSize, batch);
     flush(&st.reduce_a);
 
-    // 5. doubling ladder over u[j], then to affine for the mixed adds
+    // 5. doubling ladder over u[j], then fold into L+/L- (see layout_defs.h).
+    // Kept as two dispatches, each with a single G1 accumulator per thread:
+    // an earlier version folded while doubling (one thread driving both
+    // u[j]'s and u[j+64]'s chains at once, halving thread count but doubling
+    // live registers per thread) and that measured *worse* on this driver,
+    // most likely from the occupancy hit of doubled register pressure
+    // outweighing the saved dispatch.
     {
         struct { uint64_t ladderAddr, uAddr; } pc{p->bufLadderJac.addr, p->bufPoints.addr};
         dispatch(cmd, p->psoLadder, p->pipelineLayout, pc, kCirculantSize / 128, batch);
     }
     flush(&st.ladder);
 
-    // 6. phase B, split form (X^128-1 = (X^64-1)(X^64+1); see layout_defs.h):
-    // fold the ladder into its "plus"/"minus" halves, normalize once (same
-    // total point count as the flat form), run the split bucket-MSM over
-    // each half in turn (bufBuckets and bufPoints/bufLadderJac are reused as
-    // scratch since nothing else needs their prior contents by this point),
-    // then recombine into the same 128-point bufProofs the rest of the
-    // pipeline already expects.
     {
         struct { uint64_t outAddr, ladderAddr; } pc{p->bufLadderJacFolded.addr, p->bufLadderJac.addr};
         const uint32_t groups = (kCirculantHalf * kLadderPositions) / 128;
@@ -813,38 +812,35 @@ vkp_result computeBatch(vkp_prover *p, uint8_t *proofs, const uint8_t *blobs, ui
                     inversionChunk(ladderPoints, 32, 128, 8192));
     flush(&st.normalize_ladder);
 
-    const uint32_t halfLadderOffset = kCirculantHalf * kLadderPositions * kAffineWords;
-
-    // 6a. "plus" half: ordinary cyclic sub-convolution.
+    // 6. phase B, split form (X^128-1 = (X^64-1)(X^64+1); see layout_defs.h):
+    // one dispatch computes both the cyclic and negacyclic halves (workgroup
+    // a in [0,64) is the cyclic half, [64,128) the negacyclic half; see
+    // k_phase_b_split.comp), writing into disjoint halves of bufBuckets, so
+    // one reduce call handles both at once. bufPoints is reused as scratch
+    // for the reduced C+/C- pair since nothing else needs its prior contents
+    // by this point.
     {
         struct {
-            uint64_t outAddr, ladderAddr, itemsAddr, offsetsAddr, permAddr;
-            uint32_t halfOffset, negacyclic;
-        } pc{p->bufBuckets.addr,       p->bufLadderAff.addr,        p->bufKernelItemsPlus.addr,
-             p->bufKernelOffsetsPlus.addr, p->bufKernelPermPlus.addr, 0u, 0u};
-        dispatch(cmd, p->psoPhaseBSplit, p->pipelineLayout, pc, kCirculantHalf, batch);
+            uint64_t outAddr, ladderAddr;
+            uint64_t itemsPlusAddr, offsetsPlusAddr, permPlusAddr;
+            uint64_t itemsMinusAddr, offsetsMinusAddr, permMinusAddr;
+        } pc{p->bufBuckets.addr,
+             p->bufLadderAff.addr,
+             p->bufKernelItemsPlus.addr,
+             p->bufKernelOffsetsPlus.addr,
+             p->bufKernelPermPlus.addr,
+             p->bufKernelItemsMinus.addr,
+             p->bufKernelOffsetsMinus.addr,
+             p->bufKernelPermMinus.addr};
+        dispatch(cmd, p->psoPhaseBSplit, p->pipelineLayout, pc, kCirculantSize, batch);
     }
-    flush(&st.phase_b_plus);
-    recordReduce(cmd, p, p->bufPoints, kCirculantHalf, batch);
-    flush(&st.reduce_b_plus);
+    flush(&st.phase_b);
+    recordReduce(cmd, p, p->bufPoints, kCirculantSize, batch);
+    flush(&st.reduce_b);
 
-    // 6b. "minus" half: negacyclic sub-convolution (extra sign flip on wrap).
+    // 6b. recombine: out[a] = C+[a]+C-[a], out[a+64] = C+[a]-C-[a].
     {
-        struct {
-            uint64_t outAddr, ladderAddr, itemsAddr, offsetsAddr, permAddr;
-            uint32_t halfOffset, negacyclic;
-        } pc{p->bufBuckets.addr,        p->bufLadderAff.addr,         p->bufKernelItemsMinus.addr,
-             p->bufKernelOffsetsMinus.addr, p->bufKernelPermMinus.addr, halfLadderOffset, 1u};
-        dispatch(cmd, p->psoPhaseBSplit, p->pipelineLayout, pc, kCirculantHalf, batch);
-    }
-    flush(&st.phase_b_minus);
-    recordReduce(cmd, p, p->bufLadderJac, kCirculantHalf, batch);
-    flush(&st.reduce_b_minus);
-
-    // 6c. recombine: out[a] = C+[a]+C-[a], out[a+64] = C+[a]-C-[a].
-    {
-        struct { uint64_t outAddr, cPlusAddr, cMinusAddr; } pc{p->bufProofs.addr, p->bufPoints.addr,
-                                                                p->bufLadderJac.addr};
+        struct { uint64_t outAddr, reducedAddr; } pc{p->bufProofs.addr, p->bufPoints.addr};
         dispatch(cmd, p->psoCombineSplit, p->pipelineLayout, pc, 1, batch);
     }
     flush(&st.combine);

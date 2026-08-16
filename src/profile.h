@@ -14,13 +14,11 @@ struct StageTimes {
     double phase_a = 0;      // recode/sort + fixed-base bucket MSM
     double reduce_a = 0;
     double ladder = 0;
-    double fold_ladder = 0;      // split form: L+/L- = L[j] +/- L[j+64]
+    double fold_ladder = 0; // L+/L- = L[j] +/- L[j+64]
     double normalize_ladder = 0;
-    double phase_b_plus = 0;     // split form: cyclic half
-    double reduce_b_plus = 0;
-    double phase_b_minus = 0;    // split form: negacyclic half
-    double reduce_b_minus = 0;
-    double combine = 0;          // split form: out[a] = C+[a] +/- C-[a]
+    double phase_b = 0;  // split form: both the cyclic and negacyclic halves
+    double reduce_b = 0; // both halves at once (disjoint bucket ranges)
+    double combine = 0;  // split form: out[a] = C+[a] +/- C-[a]
     double normalize_proofs = 0;
     double compress = 0;
     double total = 0;    // wall time including the host memcpys

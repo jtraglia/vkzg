@@ -56,14 +56,24 @@
  * phase B actually pays for) drops from 65*128 = 8320 to 33*64*2 = 4224, a
  * theoretical ~49% cut.
  *
- * Measured (batch 64, this driver): phase B's own cost (both bucket-MSM
- * dispatches plus both reductions and the combine step) dropped from
- * ~1716ms to ~1042ms of a batch-64 call -- a ~39% cut, not quite the
- * theoretical ~49% since the split form pays for 3 extra dispatches
- * (fold, a second bucket-MSM, a second reduce, a combine) that the flat
- * form didn't need. Net effect on total throughput: ~18% at batch >= 8,
- * enough to land this port ahead of the original Metal build's numbers on
- * the same 8-core M1 -- see the README's Results section.
+ * The cyclic and negacyclic halves run as *one* dispatch (128 workgroups,
+ * a uniform-per-workgroup branch on `a` picks which half's tables to read;
+ * see k_phase_b_split.comp), and both halves' buckets get reduced by a
+ * single k_bucket_reduce.comp call too, since they occupy disjoint ranges
+ * of the same bucket buffer. An earlier version used two dispatches per
+ * stage (one per half) and measured noticeably worse at small batch: on
+ * this driver each extra dispatch's fixed overhead (submission, the
+ * pipeline barrier in vulkan_prover.cpp) costs more than this algorithmic
+ * saving does when there isn't much batch to amortise it over. Collapsing
+ * to one dispatch per stage keeps the large-batch win without that
+ * small-batch cost -- see the README's Results section for the numbers.
+ *
+ * (k_ladder.comp and k_fold_ladder.comp stay two separate dispatches,
+ * *not* similarly merged: an attempt to fold while doubling -- one thread
+ * driving both u[j]'s and u[j+64]'s chains at once, halving thread count
+ * but doubling live registers per thread -- measured worse than the two
+ * separate dispatches, most likely register-pressure/occupancy loss
+ * outweighing the saved dispatch. Not every dispatch merge is a win; check.)
  */
 #define L_CIRCULANT_HALF 64
 #define L_PHASE_B_HALF_TERMS 33

@@ -1,20 +1,23 @@
 // Phase B, split form: X^128-1 = (X^64-1)(X^64+1) factors the 128-point
-// circulant convolution into a 64-point cyclic half ("plus") and a 64-point
-// negacyclic half ("minus"), each covering half the outputs at roughly half
-// the flat form's 65 taps -- see layout_defs.h for the derivation and the
-// cost accounting, and tests/test_reference.cpp for the equivalence proof
-// against the flat form using real G1 arithmetic.
+// circulant convolution into a 64-point cyclic half ("plus", outputs
+// a in [0,64)) and a 64-point negacyclic half ("minus", outputs a in
+// [64,128)) -- see layout_defs.h for the derivation and cost accounting,
+// and tests/test_reference.cpp for the equivalence proof against the flat
+// form using real G1 arithmetic.
 //
-// This one kernel computes either half, selected by `negacyclic` and
-// `halfOffset`/`outBase` (the host runs it twice: once per half, with the
-// folded ladder from k_fold_ladder.comp and the matching kappa+/kappa-
-// tables). The cyclic half is bit-for-bit the same accumulation the flat
+// Both halves run from one dispatch (workgroup a in [0,128)) rather than
+// two, picking which half's tables to read from a uniform-per-workgroup
+// branch on `a`: on this driver, extra dispatches turned out to cost more
+// at small batch than the split saves algorithmically (see the README), so
+// this collapses what was originally two phase-B dispatches (plus a
+// separate fold and two separate reduces) down to as few as possible. The
+// cyclic half is bit-for-bit the same accumulation the original flat
 // k_phase_b.comp did, just over 64 outputs instead of 128; the negacyclic
 // half adds exactly one extra sign flip when a tap wraps past the output
 // index (e > a) -- still a fixed, precomputed item list shared by every
-// output, just like the flat form, since that comparison only needs `e`
-// (from the item) and `a` (the workgroup's own output index), not anything
-// the host would need to bake in per-item.
+// output in that half, just like the cyclic half, since that comparison
+// only needs `e` (from the item) and the half-local output index, not
+// anything the host would need to bake in per-item.
 #version 460
 #extension GL_GOOGLE_include_directive : require
 #include "field.glsl.inc"
@@ -24,28 +27,34 @@ layout(local_size_x = L_NUM_BUCKETS, local_size_y = 1, local_size_z = 1) in;
 layout(push_constant, std430) uniform PC {
     uint64_t outAddr;
     uint64_t ladderAddr;
-    uint64_t itemsAddr;
-    uint64_t offsetsAddr;
-    uint64_t permAddr;
-    uint halfOffset; // 0 for the "plus" half, L_CIRCULANT_HALF*L_LADDER_POSITIONS*L_AFFINE_WORDS for "minus"
-    uint negacyclic;  // 0 for "plus", 1 for "minus"
+    uint64_t itemsPlusAddr;
+    uint64_t offsetsPlusAddr;
+    uint64_t permPlusAddr;
+    uint64_t itemsMinusAddr;
+    uint64_t offsetsMinusAddr;
+    uint64_t permMinusAddr;
 } pc;
 
 void main() {
     U32Buf outBuf = U32Buf(pc.outAddr);
     U32Buf ladderBuf = U32Buf(pc.ladderAddr);
-    U32Buf itemsBuf = U32Buf(pc.itemsAddr);
-    U32Buf offsetsBuf = U32Buf(pc.offsetsAddr);
-    U32Buf permBuf = U32Buf(pc.permAddr);
+
+    const uint a = gl_WorkGroupID.x; // 0..127
+    const uint b = gl_WorkGroupID.y;
+    const bool isMinus = a >= L_CIRCULANT_HALF;
+    const uint aa = isMinus ? (a - L_CIRCULANT_HALF) : a; // half-local output index, 0..63
+
+    U32Buf itemsBuf = U32Buf(isMinus ? pc.itemsMinusAddr : pc.itemsPlusAddr);
+    U32Buf offsetsBuf = U32Buf(isMinus ? pc.offsetsMinusAddr : pc.offsetsPlusAddr);
+    U32Buf permBuf = U32Buf(isMinus ? pc.permMinusAddr : pc.permPlusAddr);
+    const uint halfOffset = isMinus ? (L_CIRCULANT_HALF * L_LADDER_POSITIONS * L_AFFINE_WORDS) : 0u;
 
     const uint tid = gl_LocalInvocationID.x;
-    const uint a = gl_WorkGroupID.x; // 0..63
-    const uint b = gl_WorkGroupID.y;
     const uint bucket = permBuf.v[tid];
     const uint lo = offsetsBuf.v[bucket];
     const uint hi = offsetsBuf.v[bucket + 1u];
     const uint lbase =
-        b * L_CIRCULANT_SIZE * L_LADDER_POSITIONS * L_AFFINE_WORDS + pc.halfOffset;
+        b * L_CIRCULANT_SIZE * L_LADDER_POSITIONS * L_AFFINE_WORDS + halfOffset;
 
     G1 acc = g1_identity();
     for (uint it = lo; it < hi; it++) {
@@ -53,20 +62,19 @@ void main() {
         const uint e = packed & 0xffu;
         const uint d = (packed >> 8) & 0xffu;
         const uint sign = (packed >> 16) & 1u;
-        const uint src = (a - e) & (L_CIRCULANT_HALF - 1u);
+        const uint src = (aa - e) & (L_CIRCULANT_HALF - 1u);
         G1A pt = g1a_load(ladderBuf, lbase + (src * L_LADDER_POSITIONS + d) * L_AFFINE_WORDS);
         if (sign != 0u) pt.y = fp_neg(pt.y);
         // Negacyclic wrap: a tap that rotates past index 0 to reach this
         // output picks up an extra sign flip.
-        if (pc.negacyclic != 0u && e > a) pt.y = fp_neg(pt.y);
+        if (isMinus && e > aa) pt.y = fp_neg(pt.y);
         acc = g1_madd(acc, pt);
     }
 
-    // bufBuckets has L_CIRCULANT_SIZE outputs' worth of bucket space per blob
-    // (shared with phase A and reused, sequentially, by the other half of
-    // this split); only the first L_CIRCULANT_HALF of them are used here,
-    // but the stride must match what k_bucket_reduce.comp (and phase A)
-    // expect, or the two disagree about where output `a`'s buckets live.
+    // bufBuckets has L_CIRCULANT_SIZE outputs' worth of bucket space per
+    // blob; the cyclic half fills outputs [0,64), the negacyclic half fills
+    // [64,128) -- disjoint, so both halves' 128 workgroups can share one
+    // reduce dispatch afterwards with no extra bookkeeping.
     g1_store(outBuf,
              (b * L_CIRCULANT_SIZE * L_NUM_BUCKETS + a * L_NUM_BUCKETS + bucket) * L_JACOBIAN_WORDS,
              acc);
