@@ -1,6 +1,5 @@
 before_install:
   - sdk update
-  - sdk install java 22.0.2-open
-  - sdk use java 22.0.2-open
+  - sdk list java | grep -i open
 install:
   - cd bindings/java && mvn install
