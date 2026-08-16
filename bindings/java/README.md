@@ -13,13 +13,13 @@ Java bindings via the JDK's Foreign Function & Memory API. Requires JDK 22+.
 <dependency>
     <groupId>com.github.jtraglia</groupId>
     <artifactId>vkzg</artifactId>
-    <version>v0.1.0</version>
+    <version>v0.1.6</version>
 </dependency>
 ```
 
 ```groovy
 repositories { maven { url 'https://jitpack.io' } }
-dependencies { implementation 'com.github.jtraglia:vkzg:v0.1.0' }
+dependencies { implementation 'com.github.jtraglia:vkzg:v0.1.6' }
 ```
 
 The native library isn't published with the jar; build it separately and
