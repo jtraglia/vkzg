@@ -8,7 +8,7 @@ import vkzg.Vkzg;
  */
 public class Example {
     public static void main(String[] args) {
-        Vkzg.loadTrustedSetup();
+        Vkzg.init();
         try {
             System.out.println("prover ready on " + Vkzg.deviceName());
 
@@ -32,7 +32,7 @@ public class Example {
             }
             System.out.println("proof[0] = " + hex);
         } finally {
-            Vkzg.freeTrustedSetup();
+            Vkzg.deinit();
         }
     }
 }

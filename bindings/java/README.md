@@ -3,7 +3,7 @@
 Java bindings via the JDK's Foreign Function & Memory API (no JNI glue code,
 no build tool beyond `javac`). Requires JDK 22+. Shaped like c-kzg-4844's
 Java bindings ([jc-kzg-4844](https://github.com/ConsenSys/jc-kzg-4844)): a
-global trusted setup loaded once, `byte[]` in and out.
+global GPU prover opened once, `byte[]` in and out.
 
 ## Build
 
@@ -36,8 +36,8 @@ point at the directory containing `libvkzg.so`. Alternatively, pass the
 ```java
 import vkzg.Vkzg;
 
-Vkzg.loadTrustedSetup();
+Vkzg.init();
 byte[] proofs = Vkzg.computeCellKzgProofs(blob);       // one blob
 byte[] proofs = Vkzg.computeCellKzgProofs(blobs, n);   // batched, much cheaper per blob
-Vkzg.freeTrustedSetup();
+Vkzg.deinit();
 ```

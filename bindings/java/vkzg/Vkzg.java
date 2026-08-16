@@ -12,12 +12,12 @@ import java.lang.invoke.MethodHandle;
  * Java bindings for vkzg (EIP-7594 cell KZG proof generation on the GPU),
  * via the JDK's Foreign Function &amp; Memory API -- no JNI glue code needed.
  *
- * Shaped like c-kzg-4844's Java bindings (jc-kzg-4844): a global trusted
- * setup loaded once with {@link #loadTrustedSetup()} and freed with
- * {@link #freeTrustedSetup()}, plain {@code byte[]} in and out. vkzg only
- * produces cell proofs (not cells, not verification), and its whole point
- * is GPU throughput, so {@link #computeCellKzgProofs(byte[], long)} takes
- * a batch of blobs in one call rather than one blob at a time.
+ * Shaped like c-kzg-4844's Java bindings (jc-kzg-4844): a global GPU prover
+ * opened once with {@link #init()} and closed with {@link #deinit()}, plain
+ * {@code byte[]} in and out. vkzg only produces cell proofs (not cells, not
+ * verification), and its whole point is GPU throughput, so
+ * {@link #computeCellKzgProofs(byte[], long)} takes a batch of blobs in one
+ * call rather than one blob at a time.
  *
  * Needs a shared library: build the C library with -DBUILD_SHARED_LIBS=ON
  * and either put it on java.library.path or point -Dvkzg.library.path at
@@ -92,21 +92,22 @@ public final class Vkzg {
 
     private static MemorySegment proverHandle;
 
-    /** Loads the trusted setup with a sensible default batch capacity. */
-    public static synchronized void loadTrustedSetup() {
-        loadTrustedSetup(0);
+    /** Opens the GPU prover with a sensible default batch capacity. */
+    public static synchronized void init() {
+        init(0);
     }
 
     /**
-     * Loads the trusted setup. {@code maxBatchSize} bounds how many blobs a
-     * single {@link #computeCellKzgProofs(byte[], long)} call keeps in
-     * flight on the GPU at once (larger is faster per blob, at ~5.6 MiB of
-     * GPU memory each); 0 selects a sensible default. Larger batches passed
-     * to computeCellKzgProofs are chunked transparently.
+     * Opens the GPU prover: picks a Vulkan device, compiles the shader
+     * kernels, and allocates its GPU buffers. {@code maxBatchSize} bounds
+     * how many blobs a single {@link #computeCellKzgProofs(byte[], long)}
+     * call keeps in flight on the GPU at once (larger is faster per blob,
+     * at ~5.6 MiB of GPU memory each); 0 selects a sensible default. Larger
+     * batches passed to computeCellKzgProofs are chunked transparently.
      */
-    public static synchronized void loadTrustedSetup(long maxBatchSize) {
+    public static synchronized void init(long maxBatchSize) {
         if (proverHandle != null) {
-            throw new IllegalStateException("trusted setup already loaded");
+            throw new IllegalStateException("already initialized");
         }
         try (Arena arena = Arena.ofConfined()) {
             MemorySegment opts = arena.allocate(OPTIONS_SIZE);
@@ -126,8 +127,8 @@ public final class Vkzg {
         }
     }
 
-    /** Releases the GPU prover. Safe to call {@link #loadTrustedSetup()} again afterwards. */
-    public static synchronized void freeTrustedSetup() {
+    /** Closes the GPU prover, freeing its GPU memory. Safe to {@link #init()} again afterwards. */
+    public static synchronized void deinit() {
         checkLoaded();
         try {
             PROVER_FREE.invokeExact(proverHandle);
@@ -198,7 +199,7 @@ public final class Vkzg {
 
     private static void checkLoaded() {
         if (proverHandle == null) {
-            throw new IllegalStateException("trusted setup not loaded; call loadTrustedSetup() first");
+            throw new IllegalStateException("not initialized; call init() first");
         }
     }
 }
