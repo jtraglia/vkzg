@@ -1,53 +1,51 @@
-# vkzg
+# Vulkan KZG (vkzg)
 
-`vkzg` generates EIP-7594 cell KZG proofs for Ethereum blobs entirely on the
-GPU, using Vulkan compute. Given a blob, it produces all 128 cell proofs; it
-does not compute the cells themselves (cheap on a CPU) or verify proofs. This
-matters for supernodes, which need to prove blobs continuously and are
-throughput-bound rather than latency-bound — batching many blobs per call
-keeps the GPU saturated and gets far more proofs per second than one blob at
-a time. It's tested on Apple Silicon under Asahi Linux (Mesa's Honeykrisp
-Vulkan driver) but targets any Vulkan 1.2 device.
+The `vkzg` library is uses the GPU (via Vulkan) to compute KZG cell proofs for
+Ethereum blobs. Currently, it only supports Apple M-series systems running
+Asahi Linux. In theory, it could support a wide variety of different GPUs.
 
-## Quick start
+## Prerequisites
+
+Vulkan 1.2+ loader and `glslangValidator`:
+
+```
+dnf install vulkan-loader-devel vulkan-headers glslang
+```
+
+## Build
 
 ```sh
-cmake -B build && cmake --build build -j
-ctest --test-dir build --output-on-failure
+cmake -B build
+cmake --build build -j
+./build/bench
 ```
-
-Needs a Vulkan 1.2+ loader and `glslangValidator` (e.g. on Fedora:
-`dnf install vulkan-loader-devel vulkan-headers glslang`).
-
-```c
-#include "vkzg.h"
-
-vkzg_options opts;
-vkzg_options_default(&opts);
-opts.max_batch_size = 16;
-
-vkzg_prover *prover;
-vkzg_prover_new(&prover, &opts);
-
-vkzg_compute_proofs(prover, proofs, blobs, n);
-```
-
-The whole API is in [`include/vkzg.h`](include/vkzg.h), plain C, thread-safe.
 
 ## Benchmarks
 
-Time to prove N blobs, batched in one call:
+```
+device: Apple M1 (G13G B1) (8 GPU cores)   setup: 139 ms
 
-| blobs | Apple M1 (8 GPU cores) | Apple M1 Ultra (64 GPU cores) |
-|---|---|---|
-| 1 | 98 ms | 129 ms |
-| 64 | 2.88 s (45 ms/blob) | 0.63 s (9.8 ms/blob) |
+  1 blob    best   98.50 ms   avg   98.92 ms   per blob  98.50 ms
+  2 blobs   best  136.74 ms   avg  137.47 ms   per blob  68.37 ms
+  4 blobs   best  219.66 ms   avg  220.94 ms   per blob  54.92 ms
+  8 blobs   best  400.88 ms   avg  403.60 ms   per blob  50.11 ms
+  16 blobs  best  742.50 ms   avg  753.26 ms   per blob  46.41 ms
+  32 blobs  best 1463.41 ms   avg 1467.84 ms   per blob  45.73 ms
+  64 blobs  best 2875.85 ms   avg 2887.41 ms   per blob  44.94 ms
+  128 blobs  best 5690.19 ms   avg 5708.42 ms   per blob  44.45 ms
+  256 blobs  best 11298.18 ms   avg 11332.78 ms   per blob  44.13 ms
+```
 
-The Ultra is slower at batch 1 (not enough parallel work to spread across
-its many cores) but ~4.6x faster at batch 64, so batch what you can.
+```
+device: Apple M1 Ultra (G13D C0) (64 GPU cores)   setup: 455 ms
 
-## License
-
-The embedded trusted setup (`src/setup_data.cpp`) and the test vectors under
-`tests/vectors/` come from
-[c-kzg-4844](https://github.com/ethereum/c-kzg-4844) (Apache-2.0).
+  1 blob    best  127.04 ms   avg  127.65 ms   per blob 127.04 ms
+  2 blobs   best  129.79 ms   avg  130.09 ms   per blob  64.89 ms
+  4 blobs   best  145.10 ms   avg  145.79 ms   per blob  36.28 ms
+  8 blobs   best  168.29 ms   avg  169.08 ms   per blob  21.04 ms
+  16 blobs  best  224.69 ms   avg  225.17 ms   per blob  14.04 ms
+  32 blobs  best  351.31 ms   avg  352.70 ms   per blob  10.98 ms
+  64 blobs  best  625.22 ms   avg  626.99 ms   per blob   9.77 ms
+  128 blobs  best 1181.36 ms   avg 1184.31 ms   per blob   9.23 ms
+  256 blobs  best 2271.91 ms   avg 2278.91 ms   per blob   8.87 ms
+```
