@@ -1180,8 +1180,8 @@ vkzg_result recoverBatch(vkzg_prover *p, uint8_t *cells_out, const uint8_t *cell
 
 } // namespace
 
-vkzg_result vkzg_compute_proofs(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs,
-                                  size_t num_blobs) {
+vkzg_result vkzg_compute_proofs_batch(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs,
+                                       size_t num_blobs) {
     if (!p || !blobs || !proofs) return VKZG_ERR_BADARGS;
     if (num_blobs == 0) return VKZG_OK;
 
@@ -1198,8 +1198,8 @@ vkzg_result vkzg_compute_proofs(vkzg_prover *p, uint8_t *proofs, const uint8_t *
     return VKZG_OK;
 }
 
-vkzg_result vkzg_recover_cells(vkzg_prover *p, uint8_t *cells_out, const uint8_t *cells,
-                                const uint8_t *cell_present, size_t num_blobs) {
+vkzg_result vkzg_recover_cells_batch(vkzg_prover *p, uint8_t *cells_out, const uint8_t *cells,
+                                      const uint8_t *cell_present, size_t num_blobs) {
     if (!p || !cells_out || !cells || !cell_present) return VKZG_ERR_BADARGS;
     if (num_blobs == 0) return VKZG_OK;
 

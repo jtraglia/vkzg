@@ -36,11 +36,11 @@ int main() {
 
     auto run = [&](uint32_t n) {
         // warm up
-        vkzg_compute_proofs(p, proofs.data(), blobs.data(), n);
+        vkzg_compute_proofs_batch(p, proofs.data(), blobs.data(), n);
         double best = 1e30, total = 0;
         for (int r = 0; r < reps; r++) {
             double a = now_ms();
-            vkzg_result e = vkzg_compute_proofs(p, proofs.data(), blobs.data(), n);
+            vkzg_result e = vkzg_compute_proofs_batch(p, proofs.data(), blobs.data(), n);
             double ms = now_ms() - a;
             if (e != VKZG_OK) {
                 printf("  blobs: %3u   error: %s\n", n, vkzg_error_string(e));
@@ -74,11 +74,11 @@ int main() {
     std::vector<uint8_t> recovered((size_t)maxBatch * cellsBytes);
 
     auto runRecover = [&](uint32_t n) {
-        vkzg_recover_cells(p, recovered.data(), cells.data(), present.data(), n); // warm up
+        vkzg_recover_cells_batch(p, recovered.data(), cells.data(), present.data(), n); // warm up
         double best = 1e30, total = 0;
         for (int r = 0; r < reps; r++) {
             double a = now_ms();
-            vkzg_result e = vkzg_recover_cells(p, recovered.data(), cells.data(), present.data(), n);
+            vkzg_result e = vkzg_recover_cells_batch(p, recovered.data(), cells.data(), present.data(), n);
             double ms = now_ms() - a;
             if (e != VKZG_OK) {
                 printf("  blobs: %3u   error: %s\n", n, vkzg_error_string(e));

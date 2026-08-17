@@ -19,7 +19,7 @@ import java.nio.file.StandardCopyOption;
  * via the JDK's Foreign Function &amp; Memory API -- no JNI glue code needed.
  *
  * A global GPU prover is opened once with {@link #init()} and closed with
- * {@link #deinit()}; {@link #computeCellKzgProofs(byte[], long)} takes a
+ * {@link #deinit()}; {@link #computeCellKzgProofsBatch(byte[], long)} takes a
  * batch of blobs in one call, since batching for GPU throughput is the
  * whole point.
  *
@@ -87,10 +87,10 @@ public final class Vkzg {
             FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
     private static final MethodHandle PROVER_GPU_CORE_COUNT = handle("vkzg_prover_gpu_core_count",
             FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
-    private static final MethodHandle COMPUTE_PROOFS = handle("vkzg_compute_proofs",
+    private static final MethodHandle COMPUTE_PROOFS_BATCH = handle("vkzg_compute_proofs_batch",
             FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
-    private static final MethodHandle RECOVER_CELLS = handle("vkzg_recover_cells",
+    private static final MethodHandle RECOVER_CELLS_BATCH = handle("vkzg_recover_cells_batch",
             FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
 
@@ -116,10 +116,10 @@ public final class Vkzg {
     /**
      * Opens the GPU prover: picks a Vulkan device, compiles the shader
      * kernels, and allocates its GPU buffers. {@code maxBatchSize} bounds
-     * how many blobs a single {@link #computeCellKzgProofs(byte[], long)}
+     * how many blobs a single {@link #computeCellKzgProofsBatch(byte[], long)}
      * call keeps in flight on the GPU at once (larger is faster per blob,
      * at ~5.6 MiB of GPU memory each); 0 selects a sensible default. Larger
-     * batches passed to computeCellKzgProofs are chunked transparently.
+     * batches passed to computeCellKzgProofsBatch are chunked transparently.
      */
     public static synchronized void init(long maxBatchSize) {
         if (proverHandle != null) {
@@ -161,7 +161,7 @@ public final class Vkzg {
      * Batching is markedly more efficient per blob than repeated
      * single-blob calls -- pass as many blobs as you have.
      */
-    public static synchronized byte[] computeCellKzgProofs(byte[] blobs, long blobCount) {
+    public static synchronized byte[] computeCellKzgProofsBatch(byte[] blobs, long blobCount) {
         checkLoaded();
         if (blobs.length != blobCount * BYTES_PER_BLOB) {
             throw new IllegalArgumentException(
@@ -173,7 +173,8 @@ public final class Vkzg {
             MemorySegment.copy(blobs, 0, blobsSeg, ValueLayout.JAVA_BYTE, 0, blobs.length);
             MemorySegment proofsSeg = arena.allocate(proofsLen);
 
-            int rc = (int) COMPUTE_PROOFS.invokeExact(proverHandle, proofsSeg, blobsSeg, blobCount);
+            int rc = (int) COMPUTE_PROOFS_BATCH.invokeExact(proverHandle, proofsSeg, blobsSeg,
+                    blobCount);
             if (rc != 0) {
                 throw new VkzgException(rc, errorString(rc));
             }
@@ -201,7 +202,8 @@ public final class Vkzg {
      * @return every cell, recovered: {@code blobCount} consecutive {@code
      *     CELL_PROOFS_PER_BLOB * BYTES_PER_CELL} byte arrays.
      */
-    public static synchronized byte[] recoverCells(byte[] cells, byte[] cellPresent, long blobCount) {
+    public static synchronized byte[] recoverCellsBatch(byte[] cells, byte[] cellPresent,
+            long blobCount) {
         checkLoaded();
         final long cellsPerBlobBytes = (long) CELL_PROOFS_PER_BLOB * BYTES_PER_CELL;
         if (cells.length != blobCount * cellsPerBlobBytes) {
@@ -219,8 +221,8 @@ public final class Vkzg {
             MemorySegment.copy(cellPresent, 0, presentSeg, ValueLayout.JAVA_BYTE, 0, cellPresent.length);
             MemorySegment outSeg = arena.allocate(cells.length);
 
-            int rc = (int) RECOVER_CELLS.invokeExact(proverHandle, outSeg, cellsSeg, presentSeg,
-                    blobCount);
+            int rc = (int) RECOVER_CELLS_BATCH.invokeExact(proverHandle, outSeg, cellsSeg,
+                    presentSeg, blobCount);
             if (rc != 0) {
                 throw new VkzgException(rc, errorString(rc));
             }

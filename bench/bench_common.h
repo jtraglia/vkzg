@@ -27,7 +27,7 @@ inline void fill_blob(uint8_t *blob, uint64_t seed) {
 }
 
 // Deterministic pseudo-random canonical full 128-cell extended array (the
-// same shape vkzg_recover_cells expects: cell recovery never sees an actual
+// same shape vkzg_recover_cells_batch expects: cell recovery never sees an actual
 // blob, only cells). Real, non-zero data matters here -- an all-zero array
 // would make every scalar multiply in the pipeline degenerate and give
 // misleadingly fast timings.

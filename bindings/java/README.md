@@ -28,7 +28,7 @@ dependencies { implementation 'com.github.jtraglia:vkzg:v0.1.7' }
 import vkzg.Vkzg;
 
 Vkzg.init();
-byte[] proofs = Vkzg.computeCellKzgProofs(blobs, blob_count);
+byte[] proofs = Vkzg.computeCellKzgProofsBatch(blobs, blob_count);
 Vkzg.deinit();
 ```
 

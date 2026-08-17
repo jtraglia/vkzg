@@ -98,8 +98,8 @@ uint32_t vkzg_prover_gpu_core_count(const vkzg_prover *p);
  * Batching keeps the GPU saturated and is markedly more efficient per blob
  * than repeated single-blob calls -- pass as many blobs as you have.
  */
-vkzg_result vkzg_compute_proofs(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs,
-                                  size_t num_blobs);
+vkzg_result vkzg_compute_proofs_batch(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs,
+                                       size_t num_blobs);
 
 /*
  * Recover all 128 cells for each of `num_blobs` consecutive blobs, given at
@@ -114,11 +114,11 @@ vkzg_result vkzg_compute_proofs(vkzg_prover *p, uint8_t *proofs, const uint8_t *
  * `cells_out`    receives `num_blobs` consecutive VKZG_NUM_CELL_PROOFS *
  *                VKZG_BYTES_PER_CELL byte arrays: every cell, recovered.
  *
- * As with vkzg_compute_proofs, batching is markedly more efficient per blob
- * than repeated single-blob calls.
+ * As with vkzg_compute_proofs_batch, batching is markedly more efficient per
+ * blob than repeated single-blob calls.
  */
-vkzg_result vkzg_recover_cells(vkzg_prover *p, uint8_t *cells_out, const uint8_t *cells,
-                                const uint8_t *cell_present, size_t num_blobs);
+vkzg_result vkzg_recover_cells_batch(vkzg_prover *p, uint8_t *cells_out, const uint8_t *cells,
+                                      const uint8_t *cell_present, size_t num_blobs);
 
 #ifdef __cplusplus
 } /* extern "C" */
