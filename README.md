@@ -1,9 +1,10 @@
 # Vulkan KZG (vkzg)
 
-The `vkzg` library takes advantage of the GPU (via Vulkan) to perform time
-sensitive operations for Ethereum blobs. Currently, it only supports Apple
-M-series systems running Asahi Linux. In theory, it could support a wide
-variety of different GPUs.
+The `vkzg` library uses your GPU (via Vulkan) to provide really fast functions
+for recovering cells and computing proofs for Ethereum blobs. These are time
+sensitive operations performed by supernodes in the network. Currently, it only
+supports Apple M-series systems running Asahi Linux. In theory, it could
+support a wide variety of different GPUs.
 
 ## Functions
 
