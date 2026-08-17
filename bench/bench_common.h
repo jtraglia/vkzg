@@ -22,7 +22,11 @@ inline void fill_blob(uint8_t *blob, uint64_t seed) {
             s ^= s << 17;
             fe[j] = (uint8_t)(s >> 24);
         }
-        fe[0] = 0; // keep every element below r
+        // The modulus r's top byte is 0x73 (0b0111_0011); clearing just its top
+        // two bits (rather than the whole byte) is enough to guarantee every
+        // element is below r regardless of the remaining bytes, while keeping
+        // 6 bits of real entropy instead of 0.
+        fe[0] &= 0x3F;
     }
 }
 
@@ -42,6 +46,10 @@ inline void fill_cells(uint8_t *cells, uint64_t seed) {
             s ^= s << 17;
             fe[j] = (uint8_t)(s >> 24);
         }
-        fe[0] = 0; // keep every element below r
+        // The modulus r's top byte is 0x73 (0b0111_0011); clearing just its top
+        // two bits (rather than the whole byte) is enough to guarantee every
+        // element is below r regardless of the remaining bytes, while keeping
+        // 6 bits of real entropy instead of 0.
+        fe[0] &= 0x3F;
     }
 }
