@@ -11,6 +11,8 @@ int main() {
     const int reps = 10;
     const uint32_t maxBatch = 256;
 
+    // Set to the highest blob count in the sweep, so every measurement below
+    // exercises a single, real dispatch rather than being silently chunked.
     vkzg_options opts;
     vkzg_options_default(&opts);
     opts.max_batch_size = maxBatch;

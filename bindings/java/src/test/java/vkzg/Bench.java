@@ -9,7 +9,9 @@ public class Bench {
     private static final int MAX_BATCH = 256;
 
     public static void main(String[] args) {
-        Vkzg.init();
+        // Set to the highest blob count in the sweep, so every measurement below
+        // exercises a single, real dispatch rather than being silently chunked.
+        Vkzg.init(MAX_BATCH);
         System.out.printf("device: %s (%d GPU cores)%n%n", Vkzg.deviceName(), Vkzg.gpuCoreCount());
 
         System.out.println("Compute all cell KZG proofs for N blobs:\n");
