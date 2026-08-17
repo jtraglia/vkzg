@@ -66,7 +66,47 @@ public final class Vkzg {
         } catch (IOException e) {
             throw new UncheckedIOException("failed to extract bundled libvkzg.so", e);
         }
+        extractPrecomputedTables();
         return SymbolLookup.loaderLookup();
+    }
+
+    /**
+     * The native library reads its precomputed FK20/position tables from a
+     * path baked in at compile time (a build-tree or install-tree location);
+     * neither exists for a jar downloaded onto an arbitrary machine, so
+     * extract the bundled copy and point the library at it via
+     * $VKZG_TABLES_PATH, which it checks first.
+     */
+    private static void extractPrecomputedTables() {
+        try (InputStream in = Vkzg.class.getResourceAsStream("/native/precomputed_tables.bin")) {
+            if (in == null) {
+                throw new UnsatisfiedLinkError(
+                        "bundled native/precomputed_tables.bin resource not found in jar");
+            }
+            Path tmp = Files.createTempFile("vkzg_precomputed_tables", ".bin");
+            tmp.toFile().deleteOnExit();
+            Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
+            setenv("VKZG_TABLES_PATH", tmp.toAbsolutePath().toString());
+        } catch (IOException e) {
+            throw new UncheckedIOException("failed to extract bundled precomputed_tables.bin", e);
+        }
+    }
+
+    private static void setenv(String name, String value) {
+        MemorySegment sym = LINKER.defaultLookup().find("setenv").orElseThrow(
+                () -> new UnsatisfiedLinkError("symbol not found: setenv"));
+        MethodHandle setenv = LINKER.downcallHandle(sym,
+                FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_INT));
+        try (Arena arena = Arena.ofConfined()) {
+            int rc = (int) setenv.invokeExact(arena.allocateFrom(name), arena.allocateFrom(value), 1);
+            if (rc != 0) {
+                throw new UnsatisfiedLinkError("setenv(" + name + ") failed");
+            }
+        } catch (Throwable t) {
+            if (t instanceof UnsatisfiedLinkError e) throw e;
+            throw new AssertionError(t);
+        }
     }
 
     private static MethodHandle handle(String name, FunctionDescriptor fd) {

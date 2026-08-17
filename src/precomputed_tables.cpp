@@ -7,6 +7,7 @@
 #include "install_paths.h"
 
 #include <cstdio>
+#include <cstdlib>
 
 namespace vkzg {
 
@@ -58,9 +59,15 @@ done:
 
 } // namespace
 
-// Tries the build-tree copy first (so tests/bench/example work straight out
-// of `cmake --build` with no install step), then the installed location.
+// Tries $VKZG_TABLES_PATH first (for callers that bundle the file
+// themselves rather than relying on a build-tree or install-tree layout,
+// e.g. the Java bindings), then the build-tree copy (so tests/bench/example
+// work straight out of `cmake --build` with no install step), then the
+// installed location.
 vkzg_result load_precomputed_tables(PrecomputedTables &out) {
+    if (const char *env = std::getenv("VKZG_TABLES_PATH")) {
+        if (load_from(env, out) == VKZG_OK) return VKZG_OK;
+    }
     if (load_from(VKZG_TABLES_PATH_BUILD, out) == VKZG_OK) return VKZG_OK;
     return load_from(VKZG_TABLES_PATH_INSTALL, out);
 }
