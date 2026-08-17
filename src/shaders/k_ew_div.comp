@@ -1,0 +1,30 @@
+// Elementwise Fr divide (a * inverse(b)) over a full-extended-domain array
+// (8192 elements/blob), batched. Used for cell recovery's polynomial
+// division by the vanishing polynomial, in evaluation form over a coset
+// (chosen so b is never zero there).
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t outAddr;
+    uint64_t aAddr;
+    uint64_t bAddr;
+} pc;
+
+void main() {
+    U32Buf outBuf = U32Buf(pc.outAddr);
+    U32Buf aBuf = U32Buf(pc.aAddr);
+    U32Buf bBuf = U32Buf(pc.bAddr);
+
+    const uint i = gl_GlobalInvocationID.x;
+    const uint b = gl_GlobalInvocationID.y;
+    if (i >= L_FIELD_ELEMENTS_PER_EXT_BLOB) return;
+
+    const uint base = b * L_FIELD_ELEMENTS_PER_EXT_BLOB;
+    const Fr av = fr_load(aBuf, (base + i) * FR_NLIMBS);
+    const Fr bv = fr_load(bBuf, (base + i) * FR_NLIMBS);
+    fr_store(outBuf, (base + i) * FR_NLIMBS, fr_mul(av, fr_inv(bv)));
+}

@@ -201,6 +201,80 @@ int main(int argc, char **argv) {
         }
     }
 
+    // ------------------------------------------------------------ cell recovery
+    {
+        const size_t cellBytes = (size_t)VKZG_NUM_CELL_PROOFS * VKZG_BYTES_PER_CELL;
+        auto recoverVectors = vkzg_test::load_all_recover(vec_dir);
+        if (recoverVectors.empty()) {
+            printf("FAIL: no recover_cells_and_kzg_proofs vectors in %s\n", vec_dir);
+            g_failures++;
+        }
+
+        std::vector<const vkzg_test::RecoverVector *> validVecs;
+        for (const auto &v : recoverVectors) {
+            std::vector<uint8_t> cells(cellBytes, 0);
+            std::vector<uint8_t> present(VKZG_NUM_CELL_PROOFS, 0);
+            for (size_t i = 0; i < v.cell_indices.size(); i++) {
+                const uint32_t idx = v.cell_indices[i];
+                memcpy(&cells[(size_t)idx * VKZG_BYTES_PER_CELL], &v.cells[i * VKZG_BYTES_PER_CELL],
+                       VKZG_BYTES_PER_CELL);
+                present[idx] = 1;
+            }
+            std::vector<uint8_t> out(cellBytes);
+            vkzg_result r = vkzg_recover_cells(p, out.data(), cells.data(), present.data(), 1);
+            if (!v.valid) {
+                if (r == VKZG_OK) {
+                    printf("FAIL %s: expected rejection, got success\n", v.name.c_str());
+                    g_failures++;
+                } else {
+                    passed++;
+                }
+                continue;
+            }
+            if (r != VKZG_OK) {
+                printf("FAIL %s: %s\n", v.name.c_str(), vkzg_error_string(r));
+                g_failures++;
+                continue;
+            }
+            if (memcmp(out.data(), v.expected_cells.data(), cellBytes) != 0) {
+                printf("FAIL %s: recovered cells MISMATCH\n", v.name.c_str());
+                g_failures++;
+            } else {
+                printf("ok  : %s\n", v.name.c_str());
+                passed++;
+                validVecs.push_back(&v);
+            }
+        }
+
+        // Batched path: every valid recover vector's blob in one call.
+        if (validVecs.size() >= 2) {
+            const size_t n = validVecs.size();
+            std::vector<uint8_t> cells(n * cellBytes, 0), present(n * VKZG_NUM_CELL_PROOFS, 0);
+            for (size_t b = 0; b < n; b++) {
+                const auto &v = *validVecs[b];
+                for (size_t i = 0; i < v.cell_indices.size(); i++) {
+                    const uint32_t idx = v.cell_indices[i];
+                    memcpy(&cells[b * cellBytes + (size_t)idx * VKZG_BYTES_PER_CELL],
+                           &v.cells[i * VKZG_BYTES_PER_CELL], VKZG_BYTES_PER_CELL);
+                    present[b * VKZG_NUM_CELL_PROOFS + idx] = 1;
+                }
+            }
+            std::vector<uint8_t> out(n * cellBytes);
+            vkzg_result r = vkzg_recover_cells(p, out.data(), cells.data(), present.data(), n);
+            bool ok = r == VKZG_OK;
+            for (size_t b = 0; ok && b < n; b++) {
+                ok &= memcmp(&out[b * cellBytes], validVecs[b]->expected_cells.data(), cellBytes) == 0;
+            }
+            if (!ok) {
+                printf("FAIL: batched recovery (%zu blobs) disagrees with the vectors\n", n);
+                g_failures++;
+            } else {
+                printf("ok  : batched recovery, %zu blobs\n", n);
+                passed++;
+            }
+        }
+    }
+
     vkzg_prover_free(p);
     printf("%s: %d checks\n", g_failures ? "FAILED" : "ok", passed);
     return g_failures ? 1 : 0;

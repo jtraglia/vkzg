@@ -11,9 +11,11 @@
  * unless stated otherwise; a single `vkzg_prover` may be shared between
  * threads, and concurrent calls are serialised internally per GPU queue.
  *
- * This library only *produces* cell proofs -- not the cells themselves
- * (computing cells from a blob is cheap on a CPU and out of scope here) and
- * not verification.
+ * This library produces cell proofs, and -- as a deliberate, considered
+ * exception, since it benefits from GPU batching about as much as proof
+ * computation does -- recovers cells when up to half of them are missing.
+ * Computing cells from a whole blob is still cheap on a CPU and out of scope
+ * here; so is verification.
  */
 #ifndef VKZG_H
 #define VKZG_H
@@ -32,6 +34,8 @@ extern "C" {
 #define VKZG_BYTES_PER_FIELD_ELEMENT 32
 #define VKZG_BYTES_PER_BLOB (VKZG_FIELD_ELEMENTS_PER_BLOB * VKZG_BYTES_PER_FIELD_ELEMENT)
 #define VKZG_BYTES_PER_PROOF 48
+#define VKZG_FIELD_ELEMENTS_PER_CELL 64
+#define VKZG_BYTES_PER_CELL (VKZG_FIELD_ELEMENTS_PER_CELL * VKZG_BYTES_PER_FIELD_ELEMENT)
 
 /* ----------------------------------------------------------------- status */
 
@@ -96,6 +100,25 @@ uint32_t vkzg_prover_gpu_core_count(const vkzg_prover *p);
  */
 vkzg_result vkzg_compute_proofs(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs,
                                   size_t num_blobs);
+
+/*
+ * Recover all 128 cells for each of `num_blobs` consecutive blobs, given at
+ * least half of each blob's cells.
+ *
+ * `cells`        is `num_blobs` consecutive arrays of VKZG_NUM_CELL_PROOFS *
+ *                VKZG_BYTES_PER_CELL bytes: a blob's full 128-cell extended
+ *                array, in column order. A missing cell's bytes are ignored.
+ * `cell_present` is `num_blobs` consecutive VKZG_NUM_CELL_PROOFS-byte arrays,
+ *                one byte per cell (nonzero = present). At least 64 of 128
+ *                must be present per blob.
+ * `cells_out`    receives `num_blobs` consecutive VKZG_NUM_CELL_PROOFS *
+ *                VKZG_BYTES_PER_CELL byte arrays: every cell, recovered.
+ *
+ * As with vkzg_compute_proofs, batching is markedly more efficient per blob
+ * than repeated single-blob calls.
+ */
+vkzg_result vkzg_recover_cells(vkzg_prover *p, uint8_t *cells_out, const uint8_t *cells,
+                                const uint8_t *cell_present, size_t num_blobs);
 
 #ifdef __cplusplus
 } /* extern "C" */

@@ -51,6 +51,17 @@ def main():
     d.append(f"const uint FR_P[8] = {glsl_arr(R, 8, 32)};\n")
     d.append(f"const uint FR_N0 = 0x{n0(R, 32):08x}u;\n")
     d.append(f"const uint FR_R2[8] = {glsl_arr(to_mont(to_mont(1, R, 256), R, 256), 8, 32)};\n")
+    # Exponent for Fermat inversion in Fr (plain integer, not Montgomery).
+    d.append(f"const uint FR_P_MINUS_2[8] = {glsl_arr(R - 2, 8, 32)};\n")
+    # Cell-recovery constants: the coset shift factor (7) and its inverse,
+    # used to seed the once-per-prover shift-power tables (see
+    # k_pow_seq.comp), and 1/FIELD_ELEMENTS_PER_EXT_BLOB for the final
+    # recovery IFFT's scale.
+    d.append(f"const uint FR_SHIFT7[8] = {glsl_arr(to_mont(7, R, 256), 8, 32)};\n")
+    d.append(f"const uint FR_INV_SHIFT7[8] = {glsl_arr(to_mont(pow(7, -1, R), R, 256), 8, 32)};\n")
+    d.append(
+        f"const uint FR_INV_EXT_BLOB[8] = {glsl_arr(to_mont(pow(8192, -1, R), R, 256), 8, 32)};\n"
+    )
     open(dev_path, "w").write("".join(d))
     print(f"wrote {dev_path}")
 

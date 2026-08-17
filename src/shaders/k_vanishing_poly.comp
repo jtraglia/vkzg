@@ -1,0 +1,91 @@
+// Builds Z(x), the monomial-form polynomial that vanishes on every missing
+// cell (each missing cell erases FIELD_ELEMENTS_PER_CELL=64 consecutive
+// points of the extended domain, at a coset of the 128-point subgroup) for
+// cell recovery. Mirrors c-kzg-4844's
+// vanishing_polynomial_for_missing_cells/compute_vanishing_polynomial_from_
+// roots: build the degree-`count` "short" vanishing polynomial over the
+// missing cells' representative roots by long multiplication of (x - r_i)
+// factors, then spread its coefficients to every 64th slot of the full
+// 8192-length output (all other slots zero).
+//
+// One workgroup per blob; the O(count^2) construction (count <= 64) runs on
+// a single thread -- negligible next to the FFTs either side of it, and
+// avoids parallelising an inherently sequential recurrence.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t outAddr;
+    uint64_t rootsAddr;   // bufRootsFwd, natural order, stride 1 per exponent
+    uint64_t missingAddr; // per blob: 1 count word + 64 index words
+} pc;
+
+// Up to 65 Fr coefficients (degree <= 64) of the "short" vanishing poly.
+shared uint sp[65 * FR_NLIMBS];
+
+Fr spGet(uint i) {
+    Fr r;
+    [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) r.v[k] = sp[i * FR_NLIMBS + k];
+    return r;
+}
+
+void spSet(uint i, Fr v) {
+    [[unroll]] for (int k = 0; k < FR_NLIMBS; k++) sp[i * FR_NLIMBS + k] = v.v[k];
+}
+
+void main() {
+    U32Buf outBuf = U32Buf(pc.outAddr);
+    U32Buf rootsBuf = U32Buf(pc.rootsAddr);
+    U32Buf missBuf = U32Buf(pc.missingAddr);
+
+    const uint tid = gl_LocalInvocationID.x;
+    const uint b = gl_WorkGroupID.y;
+    const uint outBase = b * L_FIELD_ELEMENTS_PER_EXT_BLOB;
+
+    // Zero this blob's output slice.
+    for (uint k = tid; k < L_FIELD_ELEMENTS_PER_EXT_BLOB; k += 128u) {
+        fr_store(outBuf, (outBase + k) * FR_NLIMBS, fr_zero());
+    }
+    barrier();
+
+    if (tid == 0u) {
+        const uint missBase = b * 65u;
+        const uint count = missBuf.v[missBase];
+
+        Fr rawOne = fr_zero();
+        rawOne.v[0] = 1u;
+        const Fr one = fr_from_canonical(rawOne);
+
+        if (count == 0u) {
+            // Empty product: Z(x) = 1, no cells missing.
+            fr_store(outBuf, outBase * FR_NLIMBS, one);
+        } else {
+            // stride 8192 / 128 = 64 maps a cell index to its root's exponent.
+            const uint root0 = missBuf.v[missBase + 1u];
+            spSet(0u, fr_neg(fr_load(rootsBuf, (root0 * 64u) * FR_NLIMBS)));
+
+            for (uint i = 1u; i < count; i++) {
+                const uint rooti = missBuf.v[missBase + 1u + i];
+                const Fr negRoot = fr_neg(fr_load(rootsBuf, (rooti * 64u) * FR_NLIMBS));
+
+                Fr pi = fr_add(negRoot, spGet(i - 1u));
+                spSet(i, pi);
+
+                for (uint j = i - 1u; j > 0u; j--) {
+                    Fr pj = fr_mul(spGet(j), negRoot);
+                    pj = fr_add(pj, spGet(j - 1u));
+                    spSet(j, pj);
+                }
+                spSet(0u, fr_mul(spGet(0u), negRoot));
+            }
+            spSet(count, one);
+
+            for (uint i = 0u; i <= count; i++) {
+                fr_store(outBuf, (outBase + i * L_FIELD_ELEMENTS_PER_CELL) * FR_NLIMBS, spGet(i));
+            }
+        }
+    }
+}

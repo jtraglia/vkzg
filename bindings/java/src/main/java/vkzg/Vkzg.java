@@ -35,6 +35,8 @@ public final class Vkzg {
     public static final int BYTES_PER_BLOB = FIELD_ELEMENTS_PER_BLOB * BYTES_PER_FIELD_ELEMENT;
     public static final int CELL_PROOFS_PER_BLOB = 128;
     public static final int BYTES_PER_PROOF = 48;
+    public static final int FIELD_ELEMENTS_PER_CELL = 64;
+    public static final int BYTES_PER_CELL = FIELD_ELEMENTS_PER_CELL * BYTES_PER_FIELD_ELEMENT;
 
     public static final class VkzgException extends RuntimeException {
         public final int code;
@@ -88,6 +90,9 @@ public final class Vkzg {
     private static final MethodHandle COMPUTE_PROOFS = handle("vkzg_compute_proofs",
             FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
                     ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
+    private static final MethodHandle RECOVER_CELLS = handle("vkzg_recover_cells",
+            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG));
 
     // sizeof(vkzg_options): one uint32_t (max_batch_size).
     private static final long OPTIONS_SIZE = 4;
@@ -176,6 +181,53 @@ public final class Vkzg {
             byte[] proofs = new byte[(int) proofsLen];
             MemorySegment.copy(proofsSeg, ValueLayout.JAVA_BYTE, 0, proofs, 0, proofs.length);
             return proofs;
+        } catch (Throwable t) {
+            if (t instanceof VkzgException e) throw e;
+            throw new AssertionError(t);
+        }
+    }
+
+    /**
+     * Recovers all 128 cells for each of {@code blobCount} consecutive blobs,
+     * given at least half of each blob's cells.
+     *
+     * @param cells       {@code blobCount} consecutive {@code CELL_PROOFS_PER_BLOB
+     *                    * BYTES_PER_CELL}-byte arrays: a blob's full 128-cell
+     *                    extended array, in column order. A missing cell's
+     *                    bytes are ignored.
+     * @param cellPresent {@code blobCount} consecutive {@code CELL_PROOFS_PER_BLOB}
+     *                    -byte arrays, one byte per cell (nonzero = present).
+     *                    At least 64 of 128 must be present per blob.
+     * @return every cell, recovered: {@code blobCount} consecutive {@code
+     *     CELL_PROOFS_PER_BLOB * BYTES_PER_CELL} byte arrays.
+     */
+    public static synchronized byte[] recoverCells(byte[] cells, byte[] cellPresent, long blobCount) {
+        checkLoaded();
+        final long cellsPerBlobBytes = (long) CELL_PROOFS_PER_BLOB * BYTES_PER_CELL;
+        if (cells.length != blobCount * cellsPerBlobBytes) {
+            throw new IllegalArgumentException(
+                    "cells.length must be blobCount * " + cellsPerBlobBytes);
+        }
+        if (cellPresent.length != blobCount * CELL_PROOFS_PER_BLOB) {
+            throw new IllegalArgumentException(
+                    "cellPresent.length must be blobCount * " + CELL_PROOFS_PER_BLOB);
+        }
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment cellsSeg = arena.allocate(cells.length);
+            MemorySegment.copy(cells, 0, cellsSeg, ValueLayout.JAVA_BYTE, 0, cells.length);
+            MemorySegment presentSeg = arena.allocate(cellPresent.length);
+            MemorySegment.copy(cellPresent, 0, presentSeg, ValueLayout.JAVA_BYTE, 0, cellPresent.length);
+            MemorySegment outSeg = arena.allocate(cells.length);
+
+            int rc = (int) RECOVER_CELLS.invokeExact(proverHandle, outSeg, cellsSeg, presentSeg,
+                    blobCount);
+            if (rc != 0) {
+                throw new VkzgException(rc, errorString(rc));
+            }
+
+            byte[] out = new byte[cells.length];
+            MemorySegment.copy(outSeg, ValueLayout.JAVA_BYTE, 0, out, 0, out.length);
+            return out;
         } catch (Throwable t) {
             if (t instanceof VkzgException e) throw e;
             throw new AssertionError(t);

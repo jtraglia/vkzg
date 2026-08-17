@@ -1,0 +1,40 @@
+// Populates a size-FIELD_ELEMENTS_PER_EXT_BLOB table of consecutive powers
+// of a fixed coset-shift factor (7, or its inverse): table[i] = factor^i.
+// Single thread, run once per factor at prover creation (not per-blob, not
+// per recover call) -- the tables are shared by every blob and every call.
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t outAddr;
+    uint64_t invExtBlobAddr; // single Fr slot, written 1/FIELD_ELEMENTS_PER_EXT_BLOB
+    uint mode; // 0: factor = 7, 1: factor = 1/7
+} pc;
+
+void main() {
+    U32Buf outBuf = U32Buf(pc.outAddr);
+    U32Buf invExtBlobBuf = U32Buf(pc.invExtBlobAddr);
+
+    Fr invExtBlob;
+    [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) invExtBlob.v[i] = FR_INV_EXT_BLOB[i];
+    fr_store(invExtBlobBuf, 0u, invExtBlob);
+
+    Fr factor;
+    if (pc.mode == 0u) {
+        [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) factor.v[i] = FR_SHIFT7[i];
+    } else {
+        [[unroll]] for (int i = 0; i < FR_NLIMBS; i++) factor.v[i] = FR_INV_SHIFT7[i];
+    }
+
+    Fr rawOne = fr_zero();
+    rawOne.v[0] = 1u;
+    Fr acc = fr_from_canonical(rawOne); // Montgomery form of 1
+    fr_store(outBuf, 0u, acc);
+    for (uint i = 1u; i < L_FIELD_ELEMENTS_PER_EXT_BLOB; i++) {
+        acc = fr_mul(acc, factor);
+        fr_store(outBuf, i * FR_NLIMBS, acc);
+    }
+}

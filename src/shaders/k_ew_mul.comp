@@ -1,0 +1,47 @@
+// Elementwise Fr multiply over a full-extended-domain array (8192
+// elements/blob), batched. `bMode` selects how `b` is addressed: used for
+// cell recovery's pointwise polynomial products (BATCHED, one value per
+// blob per index), applying the coset shift (SHARED_TABLE, against the
+// once-per-prover shift-power table from k_pow_seq.comp: one value per
+// index, shared by every blob), and applying a fixed scale (BROADCAST,
+// e.g. 1/FIELD_ELEMENTS_PER_EXT_BLOB: a single value for every index and
+// every blob).
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#define B_MODE_BATCHED 0u
+#define B_MODE_SHARED_TABLE 1u
+#define B_MODE_BROADCAST 2u
+
+layout(push_constant, std430) uniform PC {
+    uint64_t outAddr;
+    uint64_t aAddr;
+    uint64_t bAddr;
+    uint bMode;
+} pc;
+
+void main() {
+    U32Buf outBuf = U32Buf(pc.outAddr);
+    U32Buf aBuf = U32Buf(pc.aAddr);
+    U32Buf bBuf = U32Buf(pc.bAddr);
+
+    const uint i = gl_GlobalInvocationID.x;
+    const uint b = gl_GlobalInvocationID.y;
+    if (i >= L_FIELD_ELEMENTS_PER_EXT_BLOB) return;
+
+    const uint base = b * L_FIELD_ELEMENTS_PER_EXT_BLOB;
+    uint bIndex;
+    if (pc.bMode == B_MODE_BATCHED) {
+        bIndex = base + i;
+    } else if (pc.bMode == B_MODE_SHARED_TABLE) {
+        bIndex = i;
+    } else {
+        bIndex = 0u;
+    }
+    const Fr av = fr_load(aBuf, (base + i) * FR_NLIMBS);
+    const Fr bv = fr_load(bBuf, bIndex * FR_NLIMBS);
+    fr_store(outBuf, (base + i) * FR_NLIMBS, fr_mul(av, bv));
+}

@@ -247,6 +247,33 @@ Fr fr_mul(Fr a, Fr b) {
     return r;
 }
 
+Fr fr_neg(Fr a) {
+    return fr_sub(fr_zero(), a);
+}
+
+// a^(r-2) by square-and-multiply, mirroring fp_inv (see the note there on
+// [[dont_unroll]]) but over the scalar field, for cell-recovery's polynomial
+// division.
+Fr fr_inv(Fr a) {
+    Fr acc = a;
+    bool started = false;
+    [[dont_unroll]] for (int i = FR_NLIMBS - 1; i >= 0; i--) {
+        const uint limb = FR_P_MINUS_2[i];
+        [[dont_unroll]] for (int b = 31; b >= 0; b--) {
+            if (started) acc = fr_mul(acc, acc);
+            if (((limb >> b) & 1u) != 0u) {
+                if (started) {
+                    acc = fr_mul(acc, a);
+                } else {
+                    acc = a;
+                    started = true;
+                }
+            }
+        }
+    }
+    return acc;
+}
+
 // Leaves Montgomery form: multiplying by 1 divides out R.
 Fr fr_to_canonical(Fr a) {
     Fr one = fr_zero();

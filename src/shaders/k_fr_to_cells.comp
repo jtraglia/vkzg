@@ -1,0 +1,36 @@
+// Bit-reversed Fr values -> cell bytes, for cell recovery's output. The
+// reverse of k_cells_to_fr.comp: Montgomery -> canonical, then 8 little-
+// endian limbs -> 32 big-endian bytes, undoing the bit-reversal on the way
+// out (mirrors k_compress_proofs.comp's convention).
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "field.glsl.inc"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant, std430) uniform PC {
+    uint64_t outAddr;
+    uint64_t inAddr;
+} pc;
+
+void main() {
+    U8Buf outBuf = U8Buf(pc.outAddr);
+    U32Buf inBuf = U32Buf(pc.inAddr);
+
+    const uint i = gl_GlobalInvocationID.x;
+    const uint b = gl_GlobalInvocationID.y;
+    if (i >= L_FIELD_ELEMENTS_PER_EXT_BLOB) return;
+
+    const Fr v = fr_load(inBuf, (b * L_FIELD_ELEMENTS_PER_EXT_BLOB + i) * FR_NLIMBS);
+    const Fr c = fr_to_canonical(v);
+    const uint dst = brev(i, 13u);
+    const uint obase = (b * L_FIELD_ELEMENTS_PER_EXT_BLOB + dst) * 32u;
+    [[unroll]] for (int limb = 0; limb < FR_NLIMBS; limb++) {
+        const uint w = c.v[limb];
+        const uint off = uint(FR_NLIMBS - 1 - limb) * 4u;
+        outBuf.v[obase + off + 0] = uint8_t(w >> 24);
+        outBuf.v[obase + off + 1] = uint8_t(w >> 16);
+        outBuf.v[obase + off + 2] = uint8_t(w >> 8);
+        outBuf.v[obase + off + 3] = uint8_t(w);
+    }
+}

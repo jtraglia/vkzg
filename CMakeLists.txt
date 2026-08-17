@@ -25,7 +25,9 @@ set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders)
 set(KERNEL_NAMES
     k_blob_to_fr k_ntt_pass k_build_circulant
     k_phase_a_sort k_phase_a k_ladder k_fold_ladder k_phase_b_split
-    k_combine_split k_normalize k_compress_proofs k_bucket_reduce)
+    k_combine_split k_normalize k_compress_proofs k_bucket_reduce
+    k_ew_mul k_ew_div k_pow_seq k_vanishing_poly
+    k_cells_to_fr k_fr_to_cells)
 set(KERNEL_SOURCES "")
 foreach(k ${KERNEL_NAMES})
     list(APPEND KERNEL_SOURCES ${SHADER_DIR}/${k}.comp)

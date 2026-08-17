@@ -126,15 +126,32 @@ struct vkzg_prover {
     VkPipeline psoReduceThroughput = VK_NULL_HANDLE; // L_REDUCE_LANES lanes, see layout_defs.h
     VkPipeline psoReduceLatency = VK_NULL_HANDLE;    // 2x L_REDUCE_LANES lanes
 
+    // Cell recovery.
+    VkPipeline psoEwMul = VK_NULL_HANDLE;
+    VkPipeline psoEwDiv = VK_NULL_HANDLE;
+    VkPipeline psoPowSeq = VK_NULL_HANDLE;
+    VkPipeline psoVanishingPoly = VK_NULL_HANDLE;
+    VkPipeline psoCellsToFr = VK_NULL_HANDLE;
+    VkPipeline psoFrToCells = VK_NULL_HANDLE;
+
     // Setup-derived, immutable.
     VkBuf bufTable, bufRootsFwd, bufRootsInv;
     VkBuf bufKernelItemsPlus, bufKernelOffsetsPlus, bufKernelPermPlus;
     VkBuf bufKernelItemsMinus, bufKernelOffsetsMinus, bufKernelPermMinus;
+    // Powers of the coset shift factor (7) and its inverse, populated once by
+    // k_pow_seq.comp at prover creation -- shared by every recover call. Same
+    // for bufInvExtBlob (a single Fr slot: 1/FIELD_ELEMENTS_PER_EXT_BLOB).
+    VkBuf bufCosetShiftFwd, bufCosetShiftInv, bufInvExtBlob;
 
     // Per-batch working set.
     VkBuf bufBlob, bufLagrange, bufWorkA, bufPolyExt, bufCoeffs, bufBuckets,
         bufItems, bufStarts, bufPerm, bufPoints, bufProofs, bufLadderJac, bufLadderJacFolded,
         bufLadderAff, bufProofsAff, bufProofBytes, bufNormScratch, bufErr;
+
+    // Cell recovery working set (see recoverBatch for the data-flow order).
+    VkBuf bufRecMissing, bufRecScratch, bufRecBrp, bufRecZCoeff, bufRecZEval, bufRecEZEval,
+        bufRecEZCoeff, bufRecShiftedA, bufRecCosetA, bufRecCosetB, bufRecPCoset, bufRecPCoeffU,
+        bufRecPCoeff, bufRecPFull, bufRecOut;
 
     uint32_t maxBatch = 0;
     std::string deviceName;
@@ -265,6 +282,25 @@ bool allocateWorkingSet(vkzg_prover *p, uint32_t batch) {
     ok &= createBuffer(p->device, p->physDev,
                        B * kCirculantSize * kLadderPositions * kFpLimbs * 4, p->bufNormScratch);
     ok &= createBuffer(p->device, p->physDev, 4, p->bufErr);
+
+    // Cell recovery: one full-extended-domain Fr array per named intermediate
+    // (see recoverBatch), plus a small per-blob missing-cell-index buffer.
+    const size_t recBufBytes = B * kFieldElementsPerExtBlob * kFrLimbs * 4;
+    ok &= createBuffer(p->device, p->physDev, B * 65 * 4, p->bufRecMissing);
+    ok &= createBuffer(p->device, p->physDev, recBufBytes, p->bufRecScratch);
+    ok &= createBuffer(p->device, p->physDev, recBufBytes, p->bufRecBrp);
+    ok &= createBuffer(p->device, p->physDev, recBufBytes, p->bufRecZCoeff);
+    ok &= createBuffer(p->device, p->physDev, recBufBytes, p->bufRecZEval);
+    ok &= createBuffer(p->device, p->physDev, recBufBytes, p->bufRecEZEval);
+    ok &= createBuffer(p->device, p->physDev, recBufBytes, p->bufRecEZCoeff);
+    ok &= createBuffer(p->device, p->physDev, recBufBytes, p->bufRecShiftedA);
+    ok &= createBuffer(p->device, p->physDev, recBufBytes, p->bufRecCosetA);
+    ok &= createBuffer(p->device, p->physDev, recBufBytes, p->bufRecCosetB);
+    ok &= createBuffer(p->device, p->physDev, recBufBytes, p->bufRecPCoset);
+    ok &= createBuffer(p->device, p->physDev, recBufBytes, p->bufRecPCoeffU);
+    ok &= createBuffer(p->device, p->physDev, recBufBytes, p->bufRecPCoeff);
+    ok &= createBuffer(p->device, p->physDev, recBufBytes, p->bufRecPFull);
+    ok &= createBuffer(p->device, p->physDev, recBufBytes, p->bufRecOut);
     if (!ok) return false;
 
     p->maxBatch = batch;
@@ -290,6 +326,22 @@ void freeWorkingSet(vkzg_prover *p) {
     destroyBuffer(p->device, p->bufProofBytes);
     destroyBuffer(p->device, p->bufNormScratch);
     destroyBuffer(p->device, p->bufErr);
+
+    destroyBuffer(p->device, p->bufRecMissing);
+    destroyBuffer(p->device, p->bufRecScratch);
+    destroyBuffer(p->device, p->bufRecBrp);
+    destroyBuffer(p->device, p->bufRecZCoeff);
+    destroyBuffer(p->device, p->bufRecZEval);
+    destroyBuffer(p->device, p->bufRecEZEval);
+    destroyBuffer(p->device, p->bufRecEZCoeff);
+    destroyBuffer(p->device, p->bufRecShiftedA);
+    destroyBuffer(p->device, p->bufRecCosetA);
+    destroyBuffer(p->device, p->bufRecCosetB);
+    destroyBuffer(p->device, p->bufRecPCoset);
+    destroyBuffer(p->device, p->bufRecPCoeffU);
+    destroyBuffer(p->device, p->bufRecPCoeff);
+    destroyBuffer(p->device, p->bufRecPFull);
+    destroyBuffer(p->device, p->bufRecOut);
 }
 
 } // namespace
@@ -307,9 +359,13 @@ vkzg_prover::~vkzg_prover() {
     destroyBuffer(device, bufKernelItemsMinus);
     destroyBuffer(device, bufKernelOffsetsMinus);
     destroyBuffer(device, bufKernelPermMinus);
+    destroyBuffer(device, bufCosetShiftFwd);
+    destroyBuffer(device, bufCosetShiftInv);
+    destroyBuffer(device, bufInvExtBlob);
     for (VkPipeline pso : {psoBlobToFr, psoNtt, psoBuildCirculant, psoPhaseASort, psoPhaseA,
                            psoLadder, psoFoldLadder, psoPhaseBSplit, psoCombineSplit, psoNormalize, psoCompress,
-                           psoReduceThroughput, psoReduceLatency}) {
+                           psoReduceThroughput, psoReduceLatency, psoEwMul, psoEwDiv,
+                           psoPowSeq, psoVanishingPoly, psoCellsToFr, psoFrToCells}) {
         if (pso) vkDestroyPipeline(device, pso, nullptr);
     }
     if (pipelineLayout) vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
@@ -419,6 +475,12 @@ vkzg_result buildPipelines(vkzg_prover *p) {
         {"k_combine_split", &p->psoCombineSplit},
         {"k_normalize", &p->psoNormalize},
         {"k_compress_proofs", &p->psoCompress},
+        {"k_ew_mul", &p->psoEwMul},
+        {"k_ew_div", &p->psoEwDiv},
+        {"k_pow_seq", &p->psoPowSeq},
+        {"k_vanishing_poly", &p->psoVanishingPoly},
+        {"k_cells_to_fr", &p->psoCellsToFr},
+        {"k_fr_to_cells", &p->psoFrToCells},
     };
 
     VkPushConstantRange pcRange{};
@@ -523,6 +585,8 @@ vkzg_result buildPipelines(vkzg_prover *p) {
     return VKZG_OK;
 }
 
+bool populateCosetShiftTables(vkzg_prover *p);
+
 vkzg_result createProver(vkzg_prover **out, PrecomputedTables &tables, const vkzg_options *opts) {
     auto *p = new vkzg_prover();
 
@@ -621,6 +685,11 @@ vkzg_result createProver(vkzg_prover **out, PrecomputedTables &tables, const vkz
                            tables.kernel_offsets_minus.size() * 4, p->bufKernelOffsetsMinus);
     ok &= createBufferFrom(p->device, p->physDev, tables.kernel_perm_minus.data(),
                            tables.kernel_perm_minus.size() * 4, p->bufKernelPermMinus);
+    ok &= createBuffer(p->device, p->physDev, (size_t)kFieldElementsPerExtBlob * kFrLimbs * 4,
+                       p->bufCosetShiftFwd);
+    ok &= createBuffer(p->device, p->physDev, (size_t)kFieldElementsPerExtBlob * kFrLimbs * 4,
+                       p->bufCosetShiftInv);
+    ok &= createBuffer(p->device, p->physDev, (size_t)kFrLimbs * 4, p->bufInvExtBlob);
     if (!ok) {
         delete p;
         return VKZG_ERR_MALLOC;
@@ -632,6 +701,15 @@ vkzg_result createProver(vkzg_prover **out, PrecomputedTables &tables, const vkz
         delete p;
         return VKZG_ERR_MALLOC;
     }
+
+    // One-time setup: populate the coset shift-power tables cell recovery
+    // needs (see k_pow_seq.comp) -- shared by every blob and every recover
+    // call, so this never needs to run again.
+    if (!populateCosetShiftTables(p)) {
+        delete p;
+        return VKZG_ERR_GPU;
+    }
+
     *out = p;
     return VKZG_OK;
 }
@@ -672,6 +750,27 @@ void dispatch(VkCommandBuffer cmd, VkPipeline pso, VkPipelineLayout layout, cons
     vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PC), &pc);
     vkCmdDispatch(cmd, groupsX, groupsY, groupsZ);
     barrier(cmd);
+}
+
+// See the forward declaration in createProver: populates bufCosetShiftFwd/Inv
+// via k_pow_seq.comp, once, at prover creation.
+bool populateCosetShiftTables(vkzg_prover *p) {
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(p->cmdBuf, &bi);
+    struct { uint64_t outAddr, invExtBlobAddr; uint32_t mode; } pcFwd{
+        p->bufCosetShiftFwd.addr, p->bufInvExtBlob.addr, 0u};
+    dispatch(p->cmdBuf, p->psoPowSeq, p->pipelineLayout, pcFwd, 1, 1);
+    struct { uint64_t outAddr, invExtBlobAddr; uint32_t mode; } pcInv{
+        p->bufCosetShiftInv.addr, p->bufInvExtBlob.addr, 1u};
+    dispatch(p->cmdBuf, p->psoPowSeq, p->pipelineLayout, pcInv, 1, 1);
+    vkEndCommandBuffer(p->cmdBuf);
+    vkResetFences(p->device, 1, &p->fence);
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &p->cmdBuf;
+    if (vkQueueSubmit(p->queue, 1, &submit, p->fence) != VK_SUCCESS) return false;
+    return vkWaitForFences(p->device, 1, &p->fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
 }
 
 void recordNtt(VkCommandBuffer cmd, vkzg_prover *p, const VkBuf &out, const VkBuf &in,
@@ -939,6 +1038,146 @@ vkzg_result computeBatch(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs, 
     return VKZG_OK;
 }
 
+// -------------------------------------------------------------- cell recovery
+
+// 7-bit reversal of a cell index (0..127), matching c-kzg-4844's
+// reverse_bits_limited(CELLS_PER_EXT_BLOB, i): the missing-cell roots are
+// indexed into the natural-order root table by the *reversed* wire index.
+uint32_t brevCell(uint32_t i) {
+    uint32_t r = 0;
+    for (int b = 0; b < 7; b++) r |= ((i >> b) & 1u) << (6 - b);
+    return r;
+}
+
+// One full unscaled 8192-point transform: two k_ntt_pass dispatches (four-
+// step, N1=128 x N2=64), via bufRecScratch as the pass-1/pass-2 handoff.
+// `roots` selects direction (bufRootsFwd = forward, bufRootsInv = inverse,
+// unscaled -- callers needing the 1/N inverse-transform scale apply it
+// afterwards with a k_ew_mul against bufInvExtBlob).
+void recoverNtt(VkCommandBuffer cmd, vkzg_prover *p, const VkBuf &out, const VkBuf &in,
+               const VkBuf &roots, uint32_t batch) {
+    NttParams q = nttPass1(kFieldElementsPerExtBlob, 128, 64, kFieldElementsPerExtBlob,
+                           kFieldElementsPerExtBlob);
+    recordNtt(cmd, p, p->bufRecScratch, in, roots, q, 64, batch);
+    NttParams r = nttPass2(kFieldElementsPerExtBlob, 128, 64, kFieldElementsPerExtBlob,
+                           kFieldElementsPerExtBlob);
+    recordNtt(cmd, p, out, p->bufRecScratch, roots, r, 128, batch);
+}
+
+// Mirrors k_ew_mul.comp's B_MODE_* constants.
+enum class EwMulBMode : uint32_t { kBatched = 0, kSharedTable = 1, kBroadcast = 2 };
+
+void recoverEwMul(VkCommandBuffer cmd, vkzg_prover *p, const VkBuf &out, const VkBuf &a,
+                  const VkBuf &b, EwMulBMode bMode, uint32_t batch) {
+    struct { uint64_t outAddr, aAddr, bAddr; uint32_t bMode; } pc{
+        out.addr, a.addr, b.addr, (uint32_t)bMode};
+    dispatch(cmd, p->psoEwMul, p->pipelineLayout, pc,
+            kFieldElementsPerExtBlob / 256, batch);
+}
+
+void recoverEwDiv(VkCommandBuffer cmd, vkzg_prover *p, const VkBuf &out, const VkBuf &a,
+                  const VkBuf &b, uint32_t batch) {
+    struct { uint64_t outAddr, aAddr, bAddr; } pc{out.addr, a.addr, b.addr};
+    dispatch(cmd, p->psoEwDiv, p->pipelineLayout, pc, kFieldElementsPerExtBlob / 256, batch);
+}
+
+const size_t kCellBytes = (size_t)kFieldElementsPerCell * VKZG_BYTES_PER_FIELD_ELEMENT;
+
+vkzg_result recoverBatch(vkzg_prover *p, uint8_t *cells_out, const uint8_t *cells,
+                         const uint8_t *cell_present, uint32_t batch) {
+    const double tStart = nowMs();
+    memcpy(p->bufRecScratch.mapped, cells, (size_t)batch * kCirculantSize * kCellBytes);
+
+    // Host-side: which cells are missing per blob, bit-reversed per the
+    // reference algorithm (see vanishing_polynomial_for_missing_cells).
+    std::vector<uint32_t> missing((size_t)batch * 65, 0);
+    for (uint32_t b = 0; b < batch; b++) {
+        uint32_t count = 0;
+        for (uint32_t i = 0; i < (uint32_t)kCirculantSize; i++) {
+            if (!cell_present[(size_t)b * kCirculantSize + i]) {
+                if (count >= (uint32_t)kFieldElementsPerCell) return VKZG_ERR_BADARGS;
+                missing[(size_t)b * 65 + 1 + count] = brevCell(i);
+                count++;
+            }
+        }
+        missing[(size_t)b * 65] = count;
+    }
+    memcpy(p->bufRecMissing.mapped, missing.data(), missing.size() * 4);
+    *(uint32_t *)p->bufErr.mapped = 0;
+
+    vkResetCommandBuffer(p->cmdBuf, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(p->cmdBuf, &bi);
+    VkCommandBuffer cmd = p->cmdBuf;
+
+    // 1. cell bytes (wire order) -> Montgomery Fr (natural FFT domain order).
+    {
+        struct { uint64_t outAddr, cellsAddr; } pc{p->bufRecBrp.addr, p->bufRecScratch.addr};
+        dispatch(cmd, p->psoCellsToFr, p->pipelineLayout, pc, kFieldElementsPerExtBlob / 256, batch);
+    }
+
+    // 2. Z(x), monomial form, vanishing on every missing cell.
+    {
+        struct { uint64_t outAddr, rootsAddr, missingAddr; } pc{
+            p->bufRecZCoeff.addr, p->bufRootsFwd.addr, p->bufRecMissing.addr};
+        dispatch(cmd, p->psoVanishingPoly, p->pipelineLayout, pc, 1, batch);
+    }
+
+    // 3. Z(x) -> evaluation form.
+    recoverNtt(cmd, p, p->bufRecZEval, p->bufRecZCoeff, p->bufRootsFwd, batch);
+
+    // 4. (E*Z)(x) in evaluation form.
+    recoverEwMul(cmd, p, p->bufRecEZEval, p->bufRecBrp, p->bufRecZEval, EwMulBMode::kBatched, batch);
+
+    // 5. (E*Z)(x) -> monomial form (unscaled transform, then the 1/N scale).
+    recoverNtt(cmd, p, p->bufRecEZCoeff, p->bufRecEZEval, p->bufRootsInv, batch);
+    recoverEwMul(cmd, p, p->bufRecEZCoeff, p->bufRecEZCoeff, p->bufInvExtBlob,
+                EwMulBMode::kBroadcast, batch);
+
+    // 6. (E*Z)(x) and Z(x) -> evaluation form over a coset (avoids dividing
+    // by zero: Z is zero only on the original domain's missing points).
+    recoverEwMul(cmd, p, p->bufRecShiftedA, p->bufRecEZCoeff, p->bufCosetShiftFwd,
+                EwMulBMode::kSharedTable, batch);
+    recoverNtt(cmd, p, p->bufRecCosetA, p->bufRecShiftedA, p->bufRootsFwd, batch);
+    recoverEwMul(cmd, p, p->bufRecShiftedA, p->bufRecZCoeff, p->bufCosetShiftFwd,
+                EwMulBMode::kSharedTable, batch);
+    recoverNtt(cmd, p, p->bufRecCosetB, p->bufRecShiftedA, p->bufRootsFwd, batch);
+
+    // 7. P(x) = (E*Z)(x) / Z(x), in evaluation form over the coset.
+    recoverEwDiv(cmd, p, p->bufRecPCoset, p->bufRecCosetA, p->bufRecCosetB, batch);
+
+    // 8. P(x) -> monomial form (coset_ifft: unscaled ifft, 1/N scale, un-shift).
+    recoverNtt(cmd, p, p->bufRecPCoeffU, p->bufRecPCoset, p->bufRootsInv, batch);
+    recoverEwMul(cmd, p, p->bufRecPCoeffU, p->bufRecPCoeffU, p->bufInvExtBlob,
+                EwMulBMode::kBroadcast, batch);
+    recoverEwMul(cmd, p, p->bufRecPCoeff, p->bufRecPCoeffU, p->bufCosetShiftInv,
+                EwMulBMode::kSharedTable, batch);
+
+    // 9. Evaluate P(x) at every point of the extended domain.
+    recoverNtt(cmd, p, p->bufRecPFull, p->bufRecPCoeff, p->bufRootsFwd, batch);
+
+    // 10. Montgomery Fr (natural FFT domain order) -> cell bytes (wire order).
+    {
+        struct { uint64_t outAddr, inAddr; } pc{p->bufRecOut.addr, p->bufRecPFull.addr};
+        dispatch(cmd, p->psoFrToCells, p->pipelineLayout, pc, kFieldElementsPerExtBlob / 256, batch);
+    }
+
+    vkEndCommandBuffer(cmd);
+    vkResetFences(p->device, 1, &p->fence);
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cmd;
+    if (vkQueueSubmit(p->queue, 1, &submit, p->fence) != VK_SUCCESS) return VKZG_ERR_GPU;
+    if (vkWaitForFences(p->device, 1, &p->fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+        return VKZG_ERR_GPU;
+    }
+
+    memcpy(cells_out, p->bufRecOut.mapped, (size_t)batch * kCirculantSize * kCellBytes);
+    (void)tStart;
+    return VKZG_OK;
+}
+
 } // namespace
 
 vkzg_result vkzg_compute_proofs(vkzg_prover *p, uint8_t *proofs, const uint8_t *blobs,
@@ -953,6 +1192,25 @@ vkzg_result vkzg_compute_proofs(vkzg_prover *p, uint8_t *proofs, const uint8_t *
         const uint32_t batch = (uint32_t)std::min<size_t>(p->maxBatch, num_blobs - done);
         vkzg_result rc = computeBatch(p, proofs + done * proofBytes, blobs + done * VKZG_BYTES_PER_BLOB,
                                        batch, /*profile=*/false);
+        if (rc != VKZG_OK) return rc;
+        done += batch;
+    }
+    return VKZG_OK;
+}
+
+vkzg_result vkzg_recover_cells(vkzg_prover *p, uint8_t *cells_out, const uint8_t *cells,
+                                const uint8_t *cell_present, size_t num_blobs) {
+    if (!p || !cells_out || !cells || !cell_present) return VKZG_ERR_BADARGS;
+    if (num_blobs == 0) return VKZG_OK;
+
+    std::lock_guard<std::mutex> lock(p->mutex);
+    const size_t cellsBytes = (size_t)kCirculantSize * kCellBytes;
+    const size_t presentBytes = (size_t)kCirculantSize;
+
+    for (size_t done = 0; done < num_blobs;) {
+        const uint32_t batch = (uint32_t)std::min<size_t>(p->maxBatch, num_blobs - done);
+        vkzg_result rc = recoverBatch(p, cells_out + done * cellsBytes, cells + done * cellsBytes,
+                                      cell_present + done * presentBytes, batch);
         if (rc != VKZG_OK) return rc;
         done += batch;
     }
